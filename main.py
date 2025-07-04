@@ -15,8 +15,8 @@ def open_camera():
 cap = open_camera()
 
 # ——— 2) DNN 초기화 ———
-prototxt = "/home/user/models/MobileNetSSD_deploy.prototxt"
-model    = "/home/user/models/MobileNetSSD_deploy.caffemodel"
+prototxt = "models/MobileNetSSD_deploy.prototxt"
+model    = "models/MobileNetSSD_deploy.caffemodel"
 net = cv2.dnn.readNetFromCaffe(prototxt, model)
 
 CLASSES = [
