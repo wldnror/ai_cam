@@ -3,16 +3,30 @@ import numpy as np
 from flask import Flask, Response
 import glob
 
-# ——— 1) 카메라 열기 ———
-def open_camera():
+# Optional screen capture
+try:
+    from mss import mss
+    have_mss = True
+except ImportError:
+    have_mss = False
+
+# ——— 1) 카메라 열기 또는 화면 캡처 준비 ———
+def init_video_source():
+    # 카메라 탐색
     for dev in sorted(glob.glob('/dev/video*')):
         cap = cv2.VideoCapture(dev)
         if cap.isOpened():
             print(f"[INFO] using camera: {dev}")
-            return cap
-    raise RuntimeError("No camera device found.")
+            return 'camera', cap
+    # 카메라 없으면 화면 캡처
+    if have_mss:
+        print("[INFO] no camera found, using screen capture")
+        sct = mss()
+        monitor = sct.monitors[0]
+        return 'screen', (sct, monitor)
+    raise RuntimeError("No camera device found and screen capture not available.")
 
-cap = open_camera()
+video_type, video_obj = init_video_source()
 
 # ——— 2) DNN 초기화 ———
 prototxt = "models/MobileNetSSD_deploy.prototxt"
@@ -31,30 +45,36 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    # 자동 생성된 HTML 반환
     html = '''<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
-    <title>Camera Stream</title>
+    <title>Camera/Screen Stream</title>
     <style>
       body { text-align: center; font-family: sans-serif; }
-      img { max-width: 100%; height: auto; border: 1px solid #ccc; }
+      img { max-width: 100%; height: auto; }
     </style>
   </head>
   <body>
-    <h2>Raspberry Pi AI Camera Stream</h2>
-    <img src="/video_feed" alt="Video Stream">
+    <h2>Raspberry Pi AI Stream ({source})</h2>
+    <img src="/video_feed" alt="Stream">
   </body>
-</html>'''
+</html>'''.format(source=video_type)
     return Response(html, mimetype='text/html')
 
 
 def generate_frames():
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # 프레임 획득
+        if video_type == 'camera':
+            ret, frame = video_obj.read()
+            if not ret:
+                break
+        else:
+            # 화면 캡처
+            sct, monitor = video_obj
+            img = np.array(sct.grab(monitor))[:, :, :3]
+            frame = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
 
         # DNN 전처리
         h, w = frame.shape[:2]
@@ -76,7 +96,7 @@ def generate_frames():
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
 
-            color = (0,0,255) if label=="person" else (255,0,0)  # BGR
+            color = (0,0,255) if label=="person" else (255,0,0)
             cv2.rectangle(frame, (startX, startY), (endX, endY), color, 2)
             cv2.putText(frame, f"{label}: {confidence:.2f}",
                         (startX, startY-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
