@@ -3,7 +3,7 @@ import torch
 from flask import Flask, Response
 
 # 모델 로드
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True, force_reload=True)
 
 # 카메라 자동 탐지
 def get_camera():
