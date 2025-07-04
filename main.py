@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from flask import Flask, Response, render_template
+from flask import Flask, Response
 import glob
 
 # ——— 1) 카메라 열기 ———
@@ -31,8 +31,24 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    # 단순한 HTML: <img src="/video_feed">
-    return render_template('index.html')
+    # 자동 생성된 HTML 반환
+    html = '''<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Camera Stream</title>
+    <style>
+      body { text-align: center; font-family: sans-serif; }
+      img { max-width: 100%; height: auto; border: 1px solid #ccc; }
+    </style>
+  </head>
+  <body>
+    <h2>Raspberry Pi AI Camera Stream</h2>
+    <img src="/video_feed" alt="Video Stream">
+  </body>
+</html>'''
+    return Response(html, mimetype='text/html')
+
 
 def generate_frames():
     while True:
@@ -80,5 +96,4 @@ def video_feed():
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
-    # 0.0.0.0:5000 으로 외부 접속 허용
     app.run(host='0.0.0.0', port=5000, threaded=True)
