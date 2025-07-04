@@ -45,21 +45,22 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    html = '''<!doctype html>
+    # 자동 생성된 HTML 반환 (CSS 중괄호는 이스케이프 처리)
+    html = f'''<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
     <title>Camera/Screen Stream</title>
     <style>
-      body { text-align: center; font-family: sans-serif; }
-      img { max-width: 100%; height: auto; }
+      body {{ text-align: center; font-family: sans-serif; }}
+      img {{ max-width: 100%; height: auto; }}
     </style>
   </head>
   <body>
-    <h2>Raspberry Pi AI Stream ({source})</h2>
+    <h2>Raspberry Pi AI Stream ({video_type})</h2>
     <img src="/video_feed" alt="Stream">
   </body>
-</html>'''.format(source=video_type)
+</html>'''
     return Response(html, mimetype='text/html')
 
 
