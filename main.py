@@ -1,4 +1,4 @@
-# server.py
+# main.py
 import cv2
 import torch
 from flask import Flask, Response, render_template
