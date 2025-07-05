@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+import warnings
+warnings.filterwarnings("ignore")  # 모든 파이썬 경고 억제
+
+import logging
+logging.getLogger('ultralytics').setLevel(logging.WARNING)  # yolov5 허브 로깅 억제
+logging.getLogger('torch').setLevel(logging.WARNING)
+werkzeug_log = logging.getLogger('werkzeug')  # Flask 요청 로그 억제
+werkzeug_log.setLevel(logging.ERROR)
+
 import os
 import time
 import threading
@@ -11,14 +20,14 @@ import psutil
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/절전 모드 방지 (X가 있을 때만 실행)
+# 0) 화면 절전/DPMS 비활성화 (X가 있을 때만)
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
         os.system('xset s off; xset s noblank; xset -dpms')
         print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
-except Exception as e:
-    print("⚠️ 화면 절전 설정 중 오류:", e)
+except Exception:
+    pass
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) PyTorch 스레드 & 추론 모드 최적화
@@ -54,8 +63,7 @@ class USBCamera:
         for i in range(5):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FOURCC,
-                        cv2.VideoWriter_fourcc(*'MJPG'))
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -82,13 +90,13 @@ except Exception:
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
-    fps = 10                                   # OPTIMIZE ▶︎ FPS 조정
+    fps = 10                          # OPT ▶︎ FPS 조정
     interval = 1.0 / fps
-    target_size = (320, 320)                   # OPTIMIZE ▶︎ 해상도 조정
-    skip_interval = 2                          # OPTIMIZE ▶︎ 프레임 스킵
+    target_size = (320, 320)          # OPT ▶︎ 해상도 조정
+    skip_interval = 2                 # OPT ▶︎ 프레임 스킵
     frame_count = 0
     last = time.time()
-    last_results = None                        # 마지막 유효 inference 결과
+    last_results = None
 
     while True:
         now = time.time()
@@ -103,7 +111,7 @@ def capture_and_process():
 
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad():
+            with torch.no_grad():     # OPT ▶︎ no_grad()
                 small = cv2.resize(frame, target_size)
                 last_results = model(small)
 
@@ -128,11 +136,10 @@ def capture_and_process():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # JPEG 인코딩
-        _, buf = cv2.imencode('.jpg', frame,
-                              [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
 
-        # 최신 프레임만 유지
+        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
             try:
                 frame_queue.get_nowait()
@@ -149,17 +156,12 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
-        )
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 def get_network_signal(interface='wlan0'):
     try:
-        out = subprocess.check_output(
-            ['iwconfig', interface],
-            stderr=subprocess.DEVNULL
-        ).decode()
+        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
             if part.startswith('level='):
                 return int(part.split('=')[1])
@@ -183,21 +185,20 @@ def video_feed():
 @app.route('/stats')
 def stats():
     cam_no = request.args.get('cam', default=1, type=int)
-    cpu    = psutil.cpu_percent(interval=0.5)
-    mem    = psutil.virtual_memory()
-    temp   = None
+    cpu = psutil.cpu_percent(interval=0.5)
+    mem = psutil.virtual_memory()
+    temp = None
     try:
         with open('/sys/class/thermal/thermal_zone0/temp') as f:
             temp = float(f.read()) / 1000.0
     except Exception:
         pass
     signal = get_network_signal('wlan0')
-
     return jsonify({
-        'camera':         cam_no,
-        'cpu_percent':    cpu,
+        'camera': cam_no,
+        'cpu_percent': cpu,
         'memory_percent': mem.percent,
-        'temperature_c':  temp,
+        'temperature_c': temp,
         'wifi_signal_dbm': signal
     })
 
