@@ -1,70 +1,45 @@
-Raspberry Pi AI Camera App
-
-이 프로젝트는 Raspberry Pi 기반의 카메라에서 객체 검출(Object Detection)을 수행하는 실시간 비디오 스트리밍 웹 앱입니다. AI 가속기(Sony IMX500 센서)를 탑재한 카메라 또는 일반 카메라(CSI/USB)를 자동으로 인식하여 최적의 성능으로 동작합니다.
-
-📷 지원 카메라 우선순위
-	1.	Raspberry Pi AI Camera (Sony IMX500) — 온-센서 AI 가속 모드
-	2.	CSI Camera (일반 Raspberry Pi 카메라 모듈) — CPU 모드
-	3.	USB Webcam — CPU 모드
-
-자동으로 감지하여 위 우선순위대로 사용합니다.
-
-⸻
-
-🚀 주요 기능
-	•	객체 검출 및 실시간 스트리밍 (YOLOv5 또는 IMX500 센서 내장 모델)
-	•	CPU 점유율, 메모리 사용량, 온도, Wi-Fi 신호 강도 실시간 모니터링
-	•	Flask 기반 웹 인터페이스 제공
-
-⸻
-
-💻 설치 방법
-
-1️⃣ 필수 패키지 설치
-
-sudo apt update
-sudo apt install -y imx500-all python3-picamera2 libcamera-apps python3-libcamera python3-opencv python3-psutil python3-flask python3-pip
-
-sudo pip3 install --upgrade pip setuptools
-sudo pip3 install torch torchvision ultralytics
-
-2️⃣ 코드 다운로드
-
-git clone <레포지토리 주소>
-cd <레포지토리 폴더명>
-
-3️⃣ 앱 실행
-
-python3 ai_camera_app.py
-
-웹 브라우저에서 http://<라즈베리파이 IP>:5000에 접속하세요.
-
-⸻
-
-🔧 웹 API
-	•	메인 페이지: /
-	•	비디오 스트림: /video_feed
-	•	시스템 상태: /stats?cam=<카메라번호>
-
-⸻
-
-📂 디렉토리 구조
-
-.
-├── ai_camera_app.py      # 메인 애플리케이션 코드
-├── templates
-│   └── index.html        # 웹 인터페이스 페이지
-└── README.md             # 이 문서
-
-
-⸻
-
-⚠️ 주의사항
-	•	IMX500 센서의 AI 가속 기능을 사용하려면 Raspberry Pi AI Camera Module을 별도로 구매해야 합니다.
-	•	카메라가 연결되지 않았거나 오류가 발생하면 다음 우선순위의 카메라를 자동으로 사용합니다.
-
-⸻
-
-📝 라이선스
-
-MIT License
+| Raspberry Pi AI Camera App                                                                                                                                      |     |                                                                         |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- | ----------------------------------------------------------------------- |
+| 이 프로젝트는 Raspberry Pi 기반의 카메라에서 객체 검출(Object Detection)을 수행하는 실시간 비디오 스트리밍 웹 앱입니다. AI 가속기(Sony IMX500 센서)를 탑재한 카메라 또는 일반 카메라(CSI/USB)를 자동으로 인식하여 최적의 성능으로 동작합니다. |     |                                                                         |
+| 📷 지원 카메라 우선순위                                                                                                                                                  |     |                                                                         |
+|                                                                                                                                                                 | 1.  | Raspberry Pi AI Camera (Sony IMX500) — 온-센서 AI 가속 모드                    |
+|                                                                                                                                                                 | 2.  | CSI Camera (일반 Raspberry Pi 카메라 모듈) — CPU 모드                            |
+|                                                                                                                                                                 | 3.  | USB Webcam — CPU 모드                                                     |
+| 자동으로 감지하여 위 우선순위대로 사용합니다.                                                                                                                                       |     |                                                                         |
+| ⸻                                                                                                                                                               |     |                                                                         |
+| 🚀 주요 기능                                                                                                                                                        |     |                                                                         |
+|                                                                                                                                                                 | •   | 객체 검출 및 실시간 스트리밍 (YOLOv5 또는 IMX500 센서 내장 모델)                            |
+|                                                                                                                                                                 | •   | CPU 점유율, 메모리 사용량, 온도, Wi-Fi 신호 강도 실시간 모니터링                              |
+|                                                                                                                                                                 | •   | Flask 기반 웹 인터페이스 제공                                                     |
+| ⸻                                                                                                                                                               |     |                                                                         |
+| 💻 설치 방법                                                                                                                                                        |     |                                                                         |
+| 1️⃣ 필수 패키지 설치                                                                                                                                                   |     |                                                                         |
+| sudo apt update                                                                                                                                                 |     |                                                                         |
+| sudo apt install -y imx500-all python3-picamera2 libcamera-apps python3-libcamera python3-opencv python3-psutil python3-flask python3-pip                       |     |                                                                         |
+| sudo pip3 install --upgrade pip setuptools                                                                                                                      |     |                                                                         |
+| sudo pip3 install torch torchvision ultralytics                                                                                                                 |     |                                                                         |
+| 2️⃣ 코드 다운로드                                                                                                                                                     |     |                                                                         |
+| git clone <레포지토리 주소>                                                                                                                                            |     |                                                                         |
+| cd <레포지토리 폴더명>                                                                                                                                                  |     |                                                                         |
+| 3️⃣ 앱 실행                                                                                                                                                        |     |                                                                         |
+| python3 ai_camera_app.py                                                                                                                                        |     |                                                                         |
+| 웹 브라우저에서 http://<라즈베리파이 IP>:5000에 접속하세요.                                                                                                                        |     |                                                                         |
+| ⸻                                                                                                                                                               |     |                                                                         |
+| 🔧 웹 API                                                                                                                                                        |     |                                                                         |
+|                                                                                                                                                                 | •   | 메인 페이지: /                                                               |
+|                                                                                                                                                                 | •   | 비디오 스트림: /video_feed                                                    |
+|                                                                                                                                                                 | •   | 시스템 상태: /stats?cam=<카메라번호>                                              |
+| ⸻                                                                                                                                                               |     |                                                                         |
+| 📂 디렉토리 구조                                                                                                                                                      |     |                                                                         |
+| .                                                                                                                                                               |     |                                                                         |
+| ├── ai_camera_app.py      # 메인 애플리케이션 코드                                                                                                                        |     |                                                                         |
+| ├── templates                                                                                                                                                   |     |                                                                         |
+| │   └── index.html        # 웹 인터페이스 페이지                                                                                                                         |     |                                                                         |
+| └── README.md             # 이 문서                                                                                                                                |     |                                                                         |
+| ⸻                                                                                                                                                               |     |                                                                         |
+| ⚠️ 주의사항                                                                                                                                                         |     |                                                                         |
+|                                                                                                                                                                 | •   | IMX500 센서의 AI 가속 기능을 사용하려면 Raspberry Pi AI Camera Module을 별도로 구매해야 합니다. |
+|                                                                                                                                                                 | •   | 카메라가 연결되지 않았거나 오류가 발생하면 다음 우선순위의 카메라를 자동으로 사용합니다.                       |
+| ⸻                                                                                                                                                               |     |                                                                         |
+| 📝 라이선스                                                                                                                                                         |     |                                                                         |
+| MIT License                                                                                                                                                     |     |                                                                         |
