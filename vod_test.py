@@ -23,9 +23,8 @@ import psutil
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
-# 캐시 및 repeat JSON 경로
+# 캐시 파일 경로
 CACHE_PATH = '/home/user/cache.pkl'
-REPEAT_PATH = '/home/user/repeat_count.json'
 
 # 0) 캐시 로드: 재부팅 후에도 사용
 try:
@@ -36,22 +35,13 @@ except Exception:
     detection_cache = {}
     repeat_count = {}
 
-# repeat_count JSON 저장함수
-def save_repeat_json():
-    try:
-        with open(REPEAT_PATH, 'w') as f:
-            json.dump(list(repeat_count.keys()), f)
-    except Exception as e:
-        print(f"⚠️ repeat_count JSON 저장 실패: {e}")
-
-# 종료 직전 캐시 및 JSON 저장
+# 종료 직전 캐시 저장
 @atexit.register
 def save_on_exit():
     try:
         with open(CACHE_PATH, 'wb') as f:
             pickle.dump((detection_cache, repeat_count), f)
-        save_repeat_json()
-        print("💾 종료 직전 캐시 및 JSON 저장 완료")
+        print("💾 종료 직전 캐시 저장 완료")
     except Exception as e:
         print(f"⚠️ 캐시 저장 실패: {e}")
 
@@ -62,7 +52,7 @@ model_fast   = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).
 model_refine = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).eval()
 model_heavy  = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True).eval()
 
-# 2) 단계 설정
+# 2) 캐시, 재생 횟수, 단계 설정
 STAGE_CONFIG = {
     1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80},  # 초저해상도
     2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},  # 저해상도
@@ -71,12 +61,6 @@ STAGE_CONFIG = {
 }
 MAX_STAGE = 4
 skip_interval = 2
-
-# 재사용 객체
-# detection_cache, repeat_count
-
-detection_cache = detection_cache
-repeat_count = repeat_count
 
 # 3) 레이블 매핑 및 폰트 설정
 label_map = {'person': '사람', 'car': '자동차'}
@@ -109,8 +93,7 @@ class CSICamera:
         self.picam2.configure(cfg)
         self.picam2.start()
         for _ in range(3): self.picam2.capture_array("main")
-    def read(self):
-        return True, self.picam2.capture_array("main")
+    def read(self): return True, self.picam2.capture_array("main")
 
 class USBCamera:
     def __init__(self):
@@ -125,10 +108,9 @@ class USBCamera:
                 for _ in range(5): cap.read()
                 self.cap = cap
                 break
-        if self.cap is None:
+        if not self.cap:
             raise RuntimeError("사용 가능한 USB 웹캠을 찾을 수 없습니다.")
-    def read(self):
-        return self.cap.read()
+    def read(self): return self.cap.read()
 
 class VideoFileCamera:
     def __init__(self, path):
@@ -142,76 +124,74 @@ class VideoFileCamera:
             ret, frame = self.cap.read()
         return ret, frame
 
-# 5) 카메라 선택
+# 5) 카메라 선택 및 초기 진행상황 출력
 video_path = os.path.expanduser('~/Desktop/1.mp4')
 if os.path.isfile(video_path):
-    camera = VideoFileCamera(video_path)
-    use_file = True
-    print(f">>> 비디오 파일 사용: {video_path}")
+    camera, use_file = VideoFileCamera(video_path), True
+    total_frames = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 else:
     try:
-        camera = CSICamera()
-        use_file = False
-        print(">>> CSI 카메라 모듈 사용")
+        camera, use_file = CSICamera(), False
     except:
-        camera = USBCamera()
-        use_file = False
-        print(">>> USB 웹캠 사용")
+        camera, use_file = USBCamera(), False
+print(f">>> {'비디오 파일' if use_file else '라이브 카메라'} 사용 중")
+if use_file:
+    recorded = len(repeat_count)
+    print(f"진행: 총 {total_frames} 프레임 중 {recorded}개 기록, 남은 {total_frames - recorded}개")
 
-# 6) 주기적 캐시 및 JSON 저장 스레드
-threading.Thread(target=lambda: (time.sleep(60), 
-                                 pickle.dump((detection_cache, repeat_count), open(CACHE_PATH,'wb')), 
-                                 save_repeat_json(), 
-                                 print("💾 주기적 캐시 및 JSON 저장 완료")),
-                  daemon=True).start()
+# 6) 주기적 캐시 저장 및 중간진행 로그
+
+def periodic_save():
+    while True:
+        time.sleep(60)
+        with open(CACHE_PATH, 'wb') as f:
+            pickle.dump((detection_cache, repeat_count), f)
+        if use_file:
+            rec = len(repeat_count)
+            print(f"⌛ 중간저장: 기록 {rec}/{total_frames} 프레임")
+
+threading.Thread(target=periodic_save, daemon=True).start()
 
 # 7) 프레임 처리 및 큐
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
-    fps = 10
-    interval = 1.0 / fps
+    fps, interval = 10, 1.0/10
     frame_count = 0
     last_results = None
 
     while True:
-        start = time.time()
+        t0 = time.time()
         ret, frame = camera.read()
         if not ret:
             continue
 
         frame_count += 1
-        # 스킵 인터벌 처리
         if frame_count % skip_interval != 0 and last_results:
             results, infer_size = last_results
         else:
-            frame_idx = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT if False else cv2.CAP_PROP_POS_FRAMES)) if use_file else frame_count
+            frame_idx = int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES)) if use_file else frame_count
             repeat_count[frame_idx] = repeat_count.get(frame_idx, 0) + 1
-            desired_stage = min(repeat_count[frame_idx], MAX_STAGE)
-
+            stage = min(repeat_count[frame_idx], MAX_STAGE)
             cached = detection_cache.get(frame_idx)
             use_cached = False
             if cached:
-                _, _, cstage, cconf = cached
-                if cstage >= desired_stage and (desired_stage == MAX_STAGE or cconf >= STAGE_CONFIG[desired_stage]['thresh']):
+                _, _, cached_stage, cached_conf = cached
+                if cached_stage >= stage and (stage == MAX_STAGE or cached_conf >= STAGE_CONFIG[stage]['thresh']):
                     use_cached = True
             if use_cached:
                 results, infer_size, _, _ = cached
             else:
-                cfg = STAGE_CONFIG[desired_stage]
+                cfg = STAGE_CONFIG[stage]
                 inp = cv2.resize(frame, cfg['size'])
-                with torch.no_grad():
-                    res = cfg['model'](inp)
+                with torch.no_grad(): res = cfg['model'](inp)
                 confs = res.xyxy[0][:,4]
-                mconf = confs.max().item() if confs.numel()>0 else 0.0
-                results = res
-                infer_size = cfg['size']
-                detection_cache[frame_idx] = (results, infer_size, desired_stage, mconf)
-            save_repeat_json()
+                max_conf = confs.max().item() if confs.numel()>0 else 0.0
+                results, infer_size = res, cfg['size']
+                detection_cache[frame_idx] = (results, infer_size, stage, max_conf)
 
         last_results = (results, infer_size)
 
-        # 라벨 그리기
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
         h_ratio = frame.shape[0] / infer_size[1]
@@ -222,22 +202,17 @@ def capture_and_process():
             label_en = results.names[int(cls)]
             label_ko = label_map.get(label_en)
             if label_ko:
-                text = f"{label_ko} {conf.item()*100:.1f}%"
-                color = (255,0,0) if label_en=='car' else (0,0,255)
-                draw.rectangle([x1,y1,x2,y2], outline=color, width=2)
-                draw.text((x1, y1-30), text, font=font, fill=color)
+                txt = f"{label_ko} {conf.item()*100:.1f}%"
+                col = (255,0,0) if label_en=='car' else (0,0,255)
+                draw.rectangle([x1,y1,x2,y2], outline=col, width=2)
+                draw.text((x1, y1-30), txt, font=font, fill=col)
 
-        # 출력
-        frame_out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        _, buf = cv2.imencode('.jpg', frame_out, [int(cv2.IMWRITE_JPEG_QUALITY),80])
+        buf = cv2.imencode('.jpg', cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY),80])[1]
         data = buf.tobytes()
         if not frame_queue.empty():
-            try: frame_queue.get_nowait()
-            except queue.Empty: pass
+            frame_queue.get_nowait()
         frame_queue.put(data)
-
-        elapsed = time.time() - start
-        time.sleep(max(0, interval - elapsed))
+        time.sleep(max(0, interval - (time.time() - t0)))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
@@ -256,34 +231,35 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(), mimeType='multipart/x-mixed-replace; boundary=frame', direct_passthrough=True)
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame', direct_passthrough=True)
     resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
+    mem = psutil.virtual_memory().percent
     temp = None
-    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except: pass
-    sig = None
+    try:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
+        pass
+    signal = None
     try:
         out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
-        for p in out.split():
-            if p.startswith('level='): sig = int(p.split('=')[1])
-    except: pass
-    return jsonify(cpu_percent=cpu, memory_percent=mem.percent, temperature_c=temp, wifi_signal_dbm=sig)
+        for part in out.split():
+            if part.startswith('level='):
+                signal = int(part.split('=')[1])
+    except:
+        pass
+    return jsonify(cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=signal)
 
 @app.route('/progress')
 def progress():
-    if use_file:
-        total = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    else:
-        total = None
-    recorded = len(repeat_count)
-    remaining = total - recorded if total is not None else None
-    return jsonify(total_frames=total, recorded_frames=recorded, remaining_frames=remaining)
+    tot = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if use_file else None
+    rec = len(repeat_count)
+    rem = tot - rec if tot is not None else None
+    return jsonify(total_frames=tot, recorded_frames=rec, remaining_frames=rem)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
