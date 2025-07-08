@@ -29,20 +29,24 @@ try:
 except Exception:
     pass
 
-# 1) PyTorch 최적화
+# 1) PyTorch 최적화 및 모델 로드
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
-# 2) 한국어 레이블 매핑 및 폰트 설정
-label_map = { 'person': '사람', 'car': '자동차' }
+def max_confidence(results):
+    """ 주어진 results 객체에서 최대 confidence 값을 반환합니다. """
+    if results is None or len(results.xyxy[0]) == 0:
+        return 0.0
+    return float(max([conf for *_, conf, _ in results.xyxy[0]]))
 
+# 2) 한국어 레이블 매핑 및 폰트 설정
+label_map = {'person': '사람', 'car': '자동차'}
 font_paths = [
     '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf',
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
     '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
 ]
-
 font = None
 for path in font_paths:
     if os.path.isfile(path):
@@ -119,62 +123,67 @@ else:
 
 # 5) 프레임 처리 및 큐
 frame_queue = queue.Queue(maxsize=1)
+detection_cache = {}  # frame_idx -> results
+CACHE_THRESHOLD = 0.5  # confidence 기준
 
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
     target_size = (320, 320)
-    skip_interval = 2
-    frame_count = 0
-    last = time.time()
-    last_results = None
+    frame_idx = 0
+    last_time = time.time()
 
     while True:
+        # 프레임 속도 제어
         now = time.time()
-        sleep = interval - (now - last)
+        sleep = interval - (now - last_time)
         if sleep > 0:
             time.sleep(sleep)
-        last = time.time()
+        last_time = time.time()
 
         ret, frame = camera.read()
         if not ret:
             continue
-        frame_count += 1
-        if frame_count % skip_interval == 0:
-            with torch.no_grad():
-                small = cv2.resize(frame, target_size)
-                last_results = model(small)
-        if last_results is None:
-            continue
+        frame_idx += 1
 
+        # 캐시 검사 후 조건에 따라 재추론
+        cached = detection_cache.get(frame_idx)
+        if cached is not None and max_confidence(cached) >= CACHE_THRESHOLD:
+            results = cached
+        else:
+            small = cv2.resize(frame, target_size)
+            with torch.no_grad():
+                results = model(small)
+            # 캐시에 저장
+            detection_cache[frame_idx] = results
+
+        # 라벨 그리기
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
 
-        for *box, conf, cls in last_results.xyxy[0]:
-            # confidence 30% 이하인 경우 표시하지 않음
+        for *box, conf, cls in results.xyxy[0]:
             if conf < 0.30:
                 continue
-
             x1, y1, x2, y2 = map(int, (
                 box[0] * w_ratio,
                 box[1] * h_ratio,
                 box[2] * w_ratio,
                 box[3] * h_ratio
             ))
-            label_en = last_results.names[int(cls)]
+            label_en = results.names[int(cls)]
             if label_en in label_map:
                 label_ko = label_map[label_en]
-                # confidence를 백분율로 변환하여 표시
                 percent = conf.item() * 100
                 text = f"{label_ko} {percent:.1f}%"
                 color = (255, 0, 0) if label_en == 'car' else (0, 0, 255)
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
                 draw.text((x1, y1 - 30), text, font=font, fill=color)
 
-        frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        # JPEG 인코딩 및 큐 삽입
+        frame_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+        _, buf = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
             try:
@@ -183,6 +192,7 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
+# 담당 스레드 시작
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # 6) Flask 앱
@@ -237,4 +247,4 @@ def stats():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000
