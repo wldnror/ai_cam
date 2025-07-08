@@ -36,6 +36,8 @@ model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
 # 2) 한국어 레이블 매핑 및 폰트 설정
 label_map = { 'person': '사람', 'car': '자동차' }
+# 시스템에 설치된 한글 폰트 경로를 지정하세요.
+# 예: sudo apt install fonts-noto-cjk
 default_font_path = '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf'
 try:
     font = ImageFont.truetype(default_font_path, 24)
@@ -48,11 +50,7 @@ class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        config = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)},
-            lores={"size": (640, 360)},
-            buffer_count=2
-        )
+        config = self.picam2.create_video_configuration(main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2)
         self.picam2.configure(config)
         self.picam2.start()
         for _ in range(3): self.picam2.capture_array("main")
@@ -122,42 +120,24 @@ def capture_and_process():
         if not ret: continue
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad():
-                small = cv2.resize(frame, target_size)
-                last_results = model(small)
+            with torch.no_grad(): small = cv2.resize(frame, target_size); last_results = model(small)
         if last_results is None: continue
 
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
-        h_ratio = frame.shape[0] / target_size[1]
-        w_ratio = frame.shape[1] / target_size[0]
-
+        h_ratio = frame.shape[0] / target_size[1]; w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
-            # 박스 좌표 계산
-            x1, y1, x2, y2 = map(int, (
-                box[0] * w_ratio,
-                box[1] * h_ratio,
-                box[2] * w_ratio,
-                box[3] * h_ratio
-            ))
+            x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
             label_en = last_results.names[int(cls)]
             if label_en in label_map:
                 label_ko = label_map[label_en]
                 color = (255,0,0) if label_en=='car' else (0,0,255)
+                draw.rectangle([x1,y1,x2,y2], outline=color, width=2)
+                draw.text((x1, y1-30), label_ko, font=font, fill=color)
 
-                # confidence -> 퍼센트 문자열
-                percent = f"{conf.item()*100:.1f}%"
-                text = f"{label_ko} {percent}"
-
-                # 박스와 텍스트 그리기
-                draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-                draw.text((x1, y1-30), text, font=font, fill=color)
-
-        # 다시 OpenCV 포맷으로 변환
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
-
         if not frame_queue.empty():
             try: frame_queue.get_nowait()
             except: pass
@@ -170,50 +150,31 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 def get_network_signal(interface='wlan0'):
     try:
         out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except:
-        return None
+            if part.startswith('level='): return int(part.split('=')[1])
+    except: return None
 
 @app.route('/')
-def index():
-    return render_template('index.html')
+def index(): return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame',
-                    direct_passthrough=True)
-    resp.headers.update({
-        'Cache-Control':'no-cache, no-store, must-revalidate',
-        'Pragma':'no-cache',
-        'Expires':'0'
-    })
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame', direct_passthrough=True)
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
 def stats():
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
-    temp = None
-    try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except:
-        pass
+    cpu = psutil.cpu_percent(interval=0.5); mem = psutil.virtual_memory(); temp=None
+    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except: pass
     signal = get_network_signal('wlan0')
-    return jsonify({
-        'cpu_percent': cpu,
-        'memory_percent': mem.percent,
-        'temperature_c': temp,
-        'wifi_signal_dbm': signal
-    })
+    return jsonify({'cpu_percent':cpu,'memory_percent':mem.percent,'temperature_c':temp,'wifi_signal_dbm':signal})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
