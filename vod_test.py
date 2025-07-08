@@ -48,7 +48,25 @@ def save_on_exit():
     except Exception as e:
         print(f"⚠️ 캐시 저장 실패: {e}")
 
-# 디스크에서 주기적으로 캐시를 다시 로드하는 스레드
+# 진짜 주기적 저장: 60초마다 디스크에 덮어쓰기
+def periodic_save(interval_sec=60):
+    while True:
+        time.sleep(interval_sec)
+        try:
+            with cache_lock:
+                with open(CACHE_PATH, 'wb') as f:
+                    pickle.dump((detection_cache, repeat_count), f)
+            print("💾 주기적 캐시 저장 완료")
+        except Exception as e:
+            print(f"⚠️ 주기적 캐시 저장 실패: {e}")
+
+threading.Thread(
+    target=periodic_save,
+    args=(60,),    # 60초마다
+    daemon=True
+).start()
+
+# 디스크에서 주기적으로 캐시를 다시 로드하는 스레드 (5분마다)
 def reload_cache_periodically(interval_sec=300):
     while True:
         time.sleep(interval_sec)
@@ -79,10 +97,10 @@ model_heavy  = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True).
 
 # 2) 캐시, 재생 횟수, 단계 설정
 STAGE_CONFIG = {
-    1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80}, 
-    2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},  
-    3: {'size': (640, 360),  'model': model_refine, 'thresh': 0.50},  
-    4: {'size': (1280, 720), 'model': model_heavy,  'thresh': 0.50},  
+    1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80},
+    2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},
+    3: {'size': (640, 360),  'model': model_refine, 'thresh': 0.50},
+    4: {'size': (1280, 720), 'model': model_heavy,  'thresh': 0.50},
 }
 MAX_STAGE = 4
 skip_interval = 2
@@ -164,19 +182,7 @@ else:
         camera, use_file = USBCamera(), False
         print(">>> USB 웹캠 사용")
 
-# 6) 주기적 캐시 저장 스레드 (기존 대로 60초마다)
-threading.Thread(
-    target=lambda: (
-        time.sleep(60),
-        cache_lock.acquire(),
-        pickle.dump((detection_cache, repeat_count), open(CACHE_PATH,'wb')),
-        cache_lock.release(),
-        print("💾 주기적 캐시 저장 완료")
-    ),
-    daemon=True
-).start()
-
-# 7) 프레임 처리 및 큐
+# 6) 프레임 처리 및 큐
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
@@ -195,7 +201,6 @@ def capture_and_process():
         if frame_count % skip_interval != 0 and last_results is not None:
             results, infer_size = last_results
         else:
-            # 캐시 및 repeat_count 접근은 락으로 보호
             with cache_lock:
                 frame_idx = int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES)) if use_file else frame_count
                 repeat_count[frame_idx] = repeat_count.get(frame_idx, 0) + 1
@@ -255,7 +260,7 @@ def capture_and_process():
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# 8) Flask 앱
+# 7) Flask 앱
 app = Flask(__name__)
 
 def generate():
@@ -293,10 +298,10 @@ def stats():
             if part.startswith('level='): signal=int(part.split('=')[1])
     except: pass
     return jsonify({
-        'cpu_percent':cpu,
-        'memory_percent':mem.percent,
-        'temperature_c':temp,
-        'wifi_signal_dbm':signal
+        'cpu_percent':     cpu,
+        'memory_percent':  mem.percent,
+        'temperature_c':   temp,
+        'wifi_signal_dbm': signal
     })
 
 if __name__ == '__main__':
