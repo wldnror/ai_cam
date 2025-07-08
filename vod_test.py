@@ -36,13 +36,25 @@ model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
 # 2) 한국어 레이블 매핑 및 폰트 설정
 label_map = { 'person': '사람', 'car': '자동차' }
-# 시스템에 설치된 한글 폰트 경로를 지정하세요.
-# 예: sudo apt install fonts-noto-cjk
-default_font_path = '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf'
-try:
-    font = ImageFont.truetype(default_font_path, 24)
-except OSError:
-    print(f"⚠️ 폰트 파일을 찾지 못했습니다: {default_font_path}\n기본 폰트로 대체합니다.")
+
+# 시도할 한글 폰트 경로 목록
+font_paths = [
+    '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf',
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+]
+
+font = None
+for path in font_paths:
+    if os.path.isfile(path):
+        try:
+            font = ImageFont.truetype(path, 24)
+            print(f"✅ 폰트 로드: {path}")
+            break
+        except OSError:
+            continue
+if font is None:
+    print(f"⚠️ 사용할 한글 폰트를 찾지 못했습니다. 기본 폰트로 대체합니다.")
     font = ImageFont.load_default()
 
 # 3) 카메라 인터페이스 정의
@@ -120,12 +132,15 @@ def capture_and_process():
         if not ret: continue
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad(): small = cv2.resize(frame, target_size); last_results = model(small)
+            with torch.no_grad():
+                small = cv2.resize(frame, target_size)
+                last_results = model(small)
         if last_results is None: continue
 
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
-        h_ratio = frame.shape[0] / target_size[1]; w_ratio = frame.shape[1] / target_size[0]
+        h_ratio = frame.shape[0] / target_size[1]
+        w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
             x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
             label_en = last_results.names[int(cls)]
