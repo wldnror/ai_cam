@@ -21,12 +21,12 @@ import psutil
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify
 
-# 1) 디스크 기반 캐시(shelve) 열기
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) 디스크 기반 캐시(shelve) 열기 (결코 삭제하지 않음)
 CACHE_SHELF = '/home/user/cache_shelf.db'
 REPEAT_SHELF = '/home/user/repeat_shelf.db'
-# writeback=False: 메모리 전체 로드 억제, get/put만 디스크 접근
-detection_cache = shelve.open(CACHE_SHELF, writeback=False)
-repeat_count     = shelve.open(REPEAT_SHELF, writeback=False)
+disk_cache   = shelve.open(CACHE_SHELF, writeback=False)
+disk_repeat  = shelve.open(REPEAT_SHELF, writeback=False)
 
 # 2) PyTorch 모델 로드 (4단계)
 torch.set_num_threads(1)
@@ -37,10 +37,10 @@ model_heavy  = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True).
 
 # 3) 단계별 설정
 STAGE_CONFIG = {
-    1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80},
+    1: {'size': (160,  90),  'model': model_fast,   'thresh': 0.80},
     2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},
     3: {'size': (640, 360),  'model': model_refine, 'thresh': 0.50},
-    4: {'size': (1280, 720), 'model': model_heavy,  'thresh': 0.50},
+    4: {'size': (1280,720),  'model': model_heavy,  'thresh': 0.50},
 }
 MAX_STAGE = 4
 skip_interval = 2
@@ -53,14 +53,14 @@ font_paths = [
     '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
 ]
 font = None
-for path in font_paths:
-    if os.path.isfile(path):
+for p in font_paths:
+    if os.path.isfile(p):
         try:
-            font = ImageFont.truetype(path, 24)
-            print(f"✅ 폰트 로드: {path}")
+            font = ImageFont.truetype(p, 24)
+            print(f"✅ 폰트 로드: {p}")
             break
         except OSError:
-            continue
+            pass
 if font is None:
     print("⚠️ 한글 폰트 미발견, 기본 폰트 사용")
     font = ImageFont.load_default()
@@ -71,9 +71,7 @@ class CSICamera:
         from picamera2 import Picamera2
         picam2 = Picamera2()
         cfg = picam2.create_video_configuration(
-            main={"size": (1280, 720)},
-            lores={"size": (640, 360)},
-            buffer_count=2
+            main={"size": (1280,720)}, lores={"size": (640,360)}, buffer_count=2
         )
         picam2.configure(cfg)
         picam2.start()
@@ -98,7 +96,7 @@ class USBCamera:
                 self.cap = cap
                 break
         if not self.cap:
-            raise RuntimeError("사용 가능한 USB 웹캠을 찾을 수 없습니다.")
+            raise RuntimeError("USB 카메라를 찾을 수 없습니다.")
     def read(self):
         return self.cap.read()
 
@@ -111,11 +109,11 @@ class VideoFileCamera:
     def read(self):
         ret, frame = self.cap.read()
         if not ret:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES,0)
             ret, frame = self.cap.read()
         return ret, frame
 
-# 6) 카메라 선택 및 초기 진행 상황
+# 6) 카메라 선택 & 초기 진행 상황
 video_path = os.path.expanduser('~/Desktop/1.mp4')
 if os.path.isfile(video_path):
     camera, use_file = VideoFileCamera(video_path), True
@@ -128,26 +126,20 @@ else:
 
 print(f">>> {'비디오 파일' if use_file else '라이브 카메라'} 사용 중")
 if use_file:
-    rec = len(repeat_count)
-    print(f"진행: 총 {total_frames}프레임 중 {rec}개 기록, 남은 {total_frames-rec}개")
+    recorded = len(disk_repeat)
+    print(f"진행: 총 {total_frames}프레임 중 {recorded}개 기록, 남은 {total_frames-recorded}개")
 
-# 7) 메모리 캐시 주기적 클리어 (LRU)
-MEM_CACHE_MAX = 1000  # 메모리에 최대 1000 엔트리 유지
+# 7) 메모리 캐시 (LRU 인덱스만 유지)
 from collections import OrderedDict
-mem_order = OrderedDict()
-
-def prune_cache():
-    while len(mem_order) > MEM_CACHE_MAX:
-        old_key, _ = mem_order.popitem(last=False)
-        detection_cache.pop(old_key, None)
-        repeat_count.pop(old_key, None)
+MEM_CACHE_MAX = 1000
+mem_keys = OrderedDict()  # key->None, only order matters
 
 # 8) 프레임 처리 스레드
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
     fps, interval = 10, 1.0/10
-    frame_idx = 0
+    frame_counter = 0
     last = None
 
     while True:
@@ -156,65 +148,77 @@ def capture_and_process():
         if not ret:
             continue
 
-        frame_idx += 1
-        if frame_idx % skip_interval != 0 and last:
+        frame_counter += 1
+        if frame_counter % skip_interval != 0 and last:
             results, infer_size = last
         else:
-            idx = str(int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES))) if use_file else str(frame_idx)
-            # update repeat count
-            rc = repeat_count.get(idx, 0) + 1
-            repeat_count[idx] = rc
+            key = str(int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES))) if use_file else str(frame_counter)
+
+            # 1) update repeat count on disk
+            rc = disk_repeat.get(key, 0) + 1
+            disk_repeat[key] = rc
             stage = min(rc, MAX_STAGE)
 
-            cache = detection_cache.get(idx)
-            usec = False
-            if cache:
-                _, _, cs, conf = cache
-                if cs >= stage and (stage == MAX_STAGE or conf >= STAGE_CONFIG[stage]['thresh']):
-                    usec = True
-
-            if usec:
-                results, infer_size, _, _ = cache
+            # 2) lookup memory cache
+            if key in mem_keys:
+                # hit in mem
+                results, infer_size, cs, conf = disk_cache[key]
             else:
-                cfg = STAGE_CONFIG[stage]
-                inp = cv2.resize(frame, cfg['size'])
-                with torch.no_grad():
-                    res = cfg['model'](inp)
-                confs = res.xyxy[0][:,4]
-                max_conf = confs.max().item() if confs.numel() else 0.0
-                results, infer_size = res, cfg['size']
-                detection_cache[idx] = (results, infer_size, stage, max_conf)
+                # miss in mem -> check disk cache
+                if key in disk_cache:
+                    results, infer_size, cs, conf = disk_cache[key]
+                else:
+                    # full inference
+                    cfg = STAGE_CONFIG[stage]
+                    inp = cv2.resize(frame, cfg['size'])
+                    with torch.no_grad():
+                        res = cfg['model'](inp)
+                    confs = res.xyxy[0][:,4]
+                    conf = confs.max().item() if confs.numel() else 0.0
+                    results, infer_size, cs, conf = res, cfg['size'], stage, conf
+                    disk_cache[key] = (results, infer_size, stage, conf)
 
-            # LRU update
-            mem_order[idx] = None
-            mem_order.move_to_end(idx)
-            prune_cache()
+                # check if should skip inference based on stage & conf
+                if cs < stage or (stage < MAX_STAGE and conf < STAGE_CONFIG[stage]['thresh']):
+                    # need refine
+                    cfg = STAGE_CONFIG[stage]
+                    inp = cv2.resize(frame, cfg['size'])
+                    with torch.no_grad():
+                        res = cfg['model'](inp)
+                    confs = res.xyxy[0][:,4]
+                    conf = confs.max().item() if confs.numel() else 0.0
+                    results, infer_size, cs, conf = res, cfg['size'], stage, conf
+                    disk_cache[key] = (results, infer_size, stage, conf)
 
-        last = (results, infer_size)
+            # 3) update mem LRU
+            mem_keys[key] = None
+            mem_keys.move_to_end(key)
+            if len(mem_keys) > MEM_CACHE_MAX:
+                old, _ = mem_keys.popitem(last=False)
+                # remove only from mem index
+                # do NOT delete from disk_cache
+            last = (results, infer_size)
 
-        # draw & encode
+        # drawing
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
         h_ratio = frame.shape[0] / infer_size[1]
         w_ratio = frame.shape[1] / infer_size[0]
         for *b, cf, cl in results.xyxy[0]:
-            if cf < 0.20:
-                continue
+            if cf < 0.20: continue
             x1, y1, x2, y2 = map(int, (b[0]*w_ratio, b[1]*h_ratio, b[2]*w_ratio, b[3]*h_ratio))
             kn = results.names[int(cl)]
             ko = label_map.get(kn)
             if ko:
                 txt = f"{ko} {cf.item()*100:.1f}%"
-                col = (255,0,0) if kn == 'car' else (0,0,255)
+                col = (255,0,0) if kn=='car' else (0,0,255)
                 draw.rectangle([x1,y1,x2,y2], outline=col, width=2)
-                draw.text((x1, y1-30), txt, font=font, fill=col)
+                draw.text((x1,y1-30), txt, font=font, fill=col)
 
-        buf = cv2.imencode('.jpg', cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR),
-                            [int(cv2.IMWRITE_JPEG_QUALITY),80])[1]
-        data = buf.tobytes()
-        if not frame_queue.empty():
-            frame_queue.get_nowait()
-        frame_queue.put(data)
+        buf = cv2.imencode('.jpg',
+               cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR),
+               [int(cv2.IMWRITE_JPEG_QUALITY),80])[1]
+        frame_queue.put(buf.tobytes())
 
         time.sleep(max(0, interval - (time.time() - t0)))
 
@@ -225,9 +229,9 @@ app = Flask(__name__)
 
 def generate():
     while True:
-        frame = frame_queue.get()
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' +
+               frame_queue.get() + b'\r\n')
 
 @app.route('/')
 def index():
@@ -236,11 +240,10 @@ def index():
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame',
-                    direct_passthrough=True)
+        mimetype='multipart/x-mixed-replace; boundary=frame',
+        direct_passthrough=True)
     resp.headers.update({'Cache-Control':'no-cache',
-                         'Pragma':'no-cache',
-                         'Expires':'0'})
+                         'Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
@@ -254,10 +257,11 @@ def stats():
         pass
     signal = None
     try:
-        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                signal = int(part.split('=')[1])
+        out = subprocess.check_output(['iwconfig','wlan0'],
+                                       stderr=subprocess.DEVNULL).decode()
+        for p in out.split():
+            if p.startswith('level='):
+                signal = int(p.split('=')[1])
     except:
         pass
     return jsonify(cpu_percent=cpu,
@@ -268,8 +272,8 @@ def stats():
 @app.route('/progress')
 def progress():
     tot = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if use_file else None
-    rec = len(repeat_count)
-    rem = tot - rec if tot is not None else None
+    rec = len(disk_repeat)
+    rem = tot-rec if tot is not None else None
     return jsonify(total_frames=tot,
                    recorded_frames=rec,
                    remaining_frames=rem)
