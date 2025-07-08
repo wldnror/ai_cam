@@ -12,7 +12,6 @@ import time
 import threading
 import queue
 import subprocess
-import sys
 
 import cv2
 import torch
@@ -33,8 +32,7 @@ except Exception:
 # 1) PyTorch 스레드 & 추론 모드 최적화
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
-model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
-model.eval()
+model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 카메라 인터페이스 정의
@@ -67,8 +65,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5):
-                    cap.read()
+                for _ in range(5): cap.read()
                 self.cap = cap
                 break
         if self.cap is None:
@@ -83,7 +80,6 @@ class VideoFileCamera:
         self.cap = cv2.VideoCapture(path)
         if not self.cap.isOpened():
             raise RuntimeError(f"비디오 파일을 열 수 없습니다: {path}")
-
     def read(self):
         ret, frame = self.cap.read()
         if not ret:
@@ -93,9 +89,9 @@ class VideoFileCamera:
         return ret, frame
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 카메라 선택: 파일 인자 우선, 없으면 CSI → USB
-if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-    video_path = sys.argv[1]
+# 3) 카메라 선택: Desktop/1.mp4 우선, 없으면 CSI → USB
+video_path = os.path.expanduser('~/Desktop/1.mp4')
+if os.path.isfile(video_path):
     camera = VideoFileCamera(video_path)
     print(f">>> Using video file: {video_path}")
 else:
@@ -122,32 +118,26 @@ def capture_and_process():
     while True:
         now = time.time()
         sleep = interval - (now - last)
-        if sleep > 0:
-            time.sleep(sleep)
+        if sleep > 0: time.sleep(sleep)
         last = time.time()
 
         ret, frame = camera.read()
-        if not ret:
-            continue
+        if not ret: continue
 
         frame_count += 1
         if frame_count % skip_interval == 0:
             with torch.no_grad():
                 small = cv2.resize(frame, target_size)
                 last_results = model(small)
-
-        if last_results is None:
-            continue
+        if last_results is None: continue
 
         # 박스 그리기
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
             x1, y1, x2, y2 = map(int, (
-                box[0] * w_ratio,
-                box[1] * h_ratio,
-                box[2] * w_ratio,
-                box[3] * h_ratio
+                box[0]*w_ratio, box[1]*h_ratio,
+                box[2]*w_ratio, box[3]*h_ratio
             ))
             label = last_results.names[int(cls)]
             if label in ('person', 'car'):
@@ -162,10 +152,8 @@ def capture_and_process():
 
         # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
+            try: frame_queue.get_nowait()
+            except queue.Empty: pass
         frame_queue.put(data)
 
 threading.Thread(target=capture_and_process, daemon=True).start()
@@ -186,8 +174,7 @@ def get_network_signal(interface='wlan0'):
         for part in out.split():
             if part.startswith('level='):
                 return int(part.split('=')[1])
-    except Exception:
-        return None
+    except Exception: return None
 
 @app.route('/')
 def index():
@@ -196,13 +183,8 @@ def index():
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame',
-                    direct_passthrough=True)
-    resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    })
+                    mimetype='multipart/x-mixed-replace; boundary=frame', direct_passthrough=True)
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate', 'Pragma':'no-cache', 'Expires':'0'})
     return resp
 
 @app.route('/stats')
@@ -213,17 +195,11 @@ def stats():
     temp = None
     try:
         with open('/sys/class/thermal/thermal_zone0/temp') as f:
-            temp = float(f.read()) / 1000.0
-    except Exception:
+            temp = float(f.read())/1000.0
+    except:
         pass
     signal = get_network_signal('wlan0')
-    return jsonify({
-        'camera': cam_no,
-        'cpu_percent': cpu,
-        'memory_percent': mem.percent,
-        'temperature_c': temp,
-        'wifi_signal_dbm': signal
-    })
+    return jsonify({'camera':cam_no, 'cpu_percent':cpu, 'memory_percent':mem.percent, 'temperature_c':temp, 'wifi_signal_dbm':signal})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
