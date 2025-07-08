@@ -34,7 +34,7 @@ except Exception:
     detection_cache = {}
     repeat_count     = {}
 
-# atexit로 종료 직전 저장
+# 종료 직전 캐시 저장
 @atexit.register
 def save_on_exit():
     try:
@@ -60,6 +60,9 @@ STAGE_CONFIG = {
 }
 MAX_STAGE = 4
 skip_interval = 2
+
+detection_cache = detection_cache
+repeat_count     = repeat_count
 
 # 3) 레이블 매핑 및 폰트 설정
 label_map = {'person': '사람', 'car': '자동차'}
@@ -142,18 +145,7 @@ else:
         print(">>> USB 웹캠 사용")
 
 # 6) 주기적 캐시 저장 스레드
-
-def periodic_save():
-    while True:
-        time.sleep(60)
-        try:
-            with open(CACHE_PATH, 'wb') as f:
-                pickle.dump((detection_cache, repeat_count), f)
-            print("💾 주기적 캐시 저장 완료")
-        except Exception as e:
-            print(f"⚠️ 주기적 캐시 저장 실패: {e}")
-
-threading.Thread(target=periodic_save, daemon=True).start()
+threading.Thread(target=lambda: (time.sleep(60), pickle.dump((detection_cache, repeat_count), open(CACHE_PATH,'wb')), print("💾 주기적 캐시 저장 완료")), daemon=True).start()
 
 # 7) 프레임 처리 및 큐
 frame_queue = queue.Queue(maxsize=1)
@@ -208,8 +200,9 @@ def capture_and_process():
             if conf < 0.20: continue
             x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
             label_en = results.names[int(cls)]
-            if label_en in label_map:
-                text = f"{label_map[label_en]} {conf.item()*100:.1f}%"
+            label_ko = label_map.get(label_en)
+            if label_ko:
+                text = f"{label_ko} {conf.item()*100:.1f}%"
                 color = (255,0,0) if label_en=='car' else (0,0,255)
                 draw.rectangle([x1,y1,x2,y2], outline=color, width=2)
                 draw.text((x1, y1-30), text, font=font, fill=color)
@@ -233,18 +226,14 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n' + b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
-%%bash
-apply_common settings
-%%bash
-apply_common settings
-
 def video_feed():
     resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame', direct_passthrough=True)
     resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
