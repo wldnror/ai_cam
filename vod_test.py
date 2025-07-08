@@ -122,13 +122,12 @@ else:
         camera, use_file = CSICamera(), False
     except:
         camera, use_file = USBCamera(), False
-
 print(f">>> {'비디오 파일' if use_file else '라이브 카메라'} 사용 중")
 if use_file:
     recorded = len(disk_repeat)
     print(f"진행: 총 {total_frames}프레임 중 {recorded}개 기록, 남은 {total_frames-recorded}개")
 
-# 7) 메모리 캐시(LRU 인덱스만 유지, 디스크는 보존)
+# 7) 메모리 캐시 (LRU 인덱스만 유지, 디스크는 보존)
 from collections import OrderedDict
 MEM_CACHE_MAX = 1000
 mem_keys = OrderedDict()
@@ -148,12 +147,10 @@ def capture_and_process():
             continue
 
         frame_counter += 1
-        # skip logic
         if frame_counter % skip_interval != 0 and last:
             results, infer_size = last
         else:
             key = str(int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES))) if use_file else str(frame_counter)
-
             # 1) repeat count 업데이트
             rc = disk_repeat.get(key, 0) + 1
             disk_repeat[key] = rc
@@ -174,9 +171,8 @@ def capture_and_process():
                     results, infer_size, cs, conf = res, cfg['size'], stage, conf
                     try:
                         disk_cache[key] = (results, infer_size, stage, conf)
-                    except Exception as e:
-                        print(f"⚠️ 디스크 캐시 저장 실패: {e}")
-                # 조건 미달 시 재추론
+                    except Exception:
+                        pass
                 if cs < stage or (stage < MAX_STAGE and conf < STAGE_CONFIG[stage]['thresh']):
                     cfg = STAGE_CONFIG[stage]
                     inp = cv2.resize(frame, cfg['size'])
@@ -186,17 +182,14 @@ def capture_and_process():
                     results, infer_size, cs, conf = res, cfg['size'], stage, conf
                     try:
                         disk_cache[key] = (results, infer_size, stage, conf)
-                    except Exception as e:
-                        print(f"⚠️ 디스크 캐시 저장 실패: {e}")
-
-            # 3) LRU 인덱스 업데이트
+                    except Exception:
+                        pass
             mem_keys[key] = None
             mem_keys.move_to_end(key)
             if len(mem_keys) > MEM_CACHE_MAX:
                 old, _ = mem_keys.popitem(last=False)
             last = (results, infer_size)
 
-        # 그리기 및 인코딩
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
         h_ratio = frame.shape[0] / infer_size[1]
@@ -209,9 +202,9 @@ def capture_and_process():
             ko = label_map.get(kn)
             if ko:
                 txt = f"{ko} {cf.item()*100:.1f}%"
-                col = (255, 0, 0) if kn == 'car' else (0, 0, 255)
-                draw.rectangle([x1, y1, x2, y2], outline=col, width=2)
-                draw.text((x1, y1-30), txt, font=font, fill=col)
+                col = (255,0,0) if kn=='car' else (0,0,255)
+                draw.rectangle([x1,y1,x2,y2], outline=col, width=2)
+                draw.text((x1,y1-30), txt, font=font, fill=col)
 
         buf = cv2.imencode('.jpg', cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR),
                             [int(cv2.IMWRITE_JPEG_QUALITY), 80])[1]
@@ -226,8 +219,7 @@ app = Flask(__name__)
 
 def generate():
     while True:
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_queue.get() + b'\r\n')
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_queue.get() + b'\r\n')
 
 @app.route('/')
 def index():
@@ -235,10 +227,8 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame',
-                    direct_passthrough=True)
-    resp.headers.update({'Cache-Control': 'no-cache', 'Pragma': 'no-cache', 'Expires': '0'})
+    resp = Response(generate(), mimetype='multipart/x-multipart; boundary=frame', direct_passthrough=True)
+    resp.headers.update({'Cache-Control':'no-cache','Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
@@ -247,12 +237,12 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
     except:
         pass
     signal = None
     try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
             if part.startswith('level='):
                 signal = int(part.split('=')[1])
@@ -264,8 +254,8 @@ def stats():
 def progress():
     tot = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if use_file else None
     rec = len(disk_repeat)
-    rem = tot - rec if tot is not None else None
+    rem = tot-rec if tot is not None else None
     return jsonify(total_frames=tot, recorded_frames=rec, remaining_frames=rem)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
