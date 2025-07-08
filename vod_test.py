@@ -142,13 +142,19 @@ def capture_and_process():
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
-            x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
+            x1, y1, x2, y2 = map(int, (
+                box[0]*w_ratio, box[1]*h_ratio,
+                box[2]*w_ratio, box[3]*h_ratio
+            ))
             label_en = last_results.names[int(cls)]
             if label_en in label_map:
                 label_ko = label_map[label_en]
                 color = (255,0,0) if label_en=='car' else (0,0,255)
-                draw.rectangle([x1,y1,x2,y2], outline=color, width=2)
-                draw.text((x1, y1-30), label_ko, font=font, fill=color)
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+                # confidence를 퍼센트로 변환하여 표시
+                conf_pct = conf * 100
+                text = f"{label_ko} {conf_pct:.0f}%"
+                draw.text((x1, y1 - 30), text, font=font, fill=color)
 
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -162,6 +168,7 @@ threading.Thread(target=capture_and_process, daemon=True).start()
 
 # 6) Flask 앱
 app = Flask(__name__)
+
 def generate():
     while True:
         frame = frame_queue.get()
