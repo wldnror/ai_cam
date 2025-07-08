@@ -36,22 +36,25 @@ model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
 # 2) 한국어 레이블 매핑 및 폰트 설정
 label_map = { 'person': '사람', 'car': '자동차' }
-# 시스템에 설치된 해돋움 폰트 경로로 변경하세요
-font_path = '/usr/share/fonts/truetype/Haedodum.ttf'
-font = ImageFont.truetype(font_path, 24)
+# 시스템에 설치된 한글 폰트 경로를 지정하세요.
+# 예: sudo apt install fonts-noto-cjk
+default_font_path = '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf'
+try:
+    font = ImageFont.truetype(default_font_path, 24)
+except OSError:
+    print(f"⚠️ 폰트 파일을 찾지 못했습니다: {default_font_path}\n기본 폰트로 대체합니다.")
+    font = ImageFont.load_default()
 
 # 3) 카메라 인터페이스 정의
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        config = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2)
+        config = self.picam2.create_video_configuration(main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2)
         self.picam2.configure(config)
         self.picam2.start()
         for _ in range(3): self.picam2.capture_array("main")
-    def read(self):
-        return True, self.picam2.capture_array("main")
+    def read(self): return True, self.picam2.capture_array("main")
 
 class USBCamera:
     def __init__(self):
@@ -68,8 +71,7 @@ class USBCamera:
                 break
         if self.cap is None:
             raise RuntimeError("사용 가능한 USB 웹캠을 찾을 수 없습니다.")
-    def read(self):
-        return self.cap.read()
+    def read(self): return self.cap.read()
 
 class VideoFileCamera:
     def __init__(self, path):
@@ -118,25 +120,19 @@ def capture_and_process():
         if not ret: continue
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad():
-                small = cv2.resize(frame, target_size)
-                last_results = model(small)
+            with torch.no_grad(): small = cv2.resize(frame, target_size); last_results = model(small)
         if last_results is None: continue
 
-        # PIL로 그리기
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
-        h_ratio = frame.shape[0] / target_size[1]
-        w_ratio = frame.shape[1] / target_size[0]
+        h_ratio = frame.shape[0] / target_size[1]; w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
-            x1, y1, x2, y2 = map(int, (
-                box[0]*w_ratio, box[1]*h_ratio,
-                box[2]*w_ratio, box[3]*h_ratio))
+            x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
             label_en = last_results.names[int(cls)]
             if label_en in label_map:
                 label_ko = label_map[label_en]
-                color = (255, 0, 0) if label_en=='car' else (0, 0, 255)
-                draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+                color = (255,0,0) if label_en=='car' else (0,0,255)
+                draw.rectangle([x1,y1,x2,y2], outline=color, width=2)
                 draw.text((x1, y1-30), label_ko, font=font, fill=color)
 
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
@@ -154,15 +150,13 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 def get_network_signal(interface='wlan0'):
     try:
         out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
+            if part.startswith('level='): return int(part.split('=')[1])
     except: return None
 
 @app.route('/')
@@ -176,12 +170,8 @@ def video_feed():
 
 @app.route('/stats')
 def stats():
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
-    temp = None
-    try:
-        with open('/sys/class/thermal/thermal_zone0/temp') as f:
-            temp = float(f.read())/1000.0
+    cpu = psutil.cpu_percent(interval=0.5); mem = psutil.virtual_memory(); temp=None
+    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
     except: pass
     signal = get_network_signal('wlan0')
     return jsonify({'cpu_percent':cpu,'memory_percent':mem.percent,'temperature_c':temp,'wifi_signal_dbm':signal})
