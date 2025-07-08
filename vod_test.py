@@ -29,15 +29,13 @@ try:
 except Exception:
     pass
 
-# 1) PyTorch 최적화
+# 1) PyTorch 최적화 및 모델 로드
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
 # 2) 한국어 레이블 매핑 및 폰트 설정
 label_map = { 'person': '사람', 'car': '자동차' }
-# 시스템에 설치된 한글 폰트 경로를 지정하세요.
-# 예: sudo apt install fonts-noto-cjk
 default_font_path = '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf'
 try:
     font = ImageFont.truetype(default_font_path, 24)
@@ -45,16 +43,22 @@ except OSError:
     print(f"⚠️ 폰트 파일을 찾지 못했습니다: {default_font_path}\n기본 폰트로 대체합니다.")
     font = ImageFont.load_default()
 
-# 3) 카메라 인터페이스 정의
+# 3) 카메라 인터페이스
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        config = self.picam2.create_video_configuration(main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2)
+        config = self.picam2.create_video_configuration(
+            main={"size": (1280, 720)},
+            lores={"size": (640, 360)},
+            buffer_count=2
+        )
         self.picam2.configure(config)
         self.picam2.start()
-        for _ in range(3): self.picam2.capture_array("main")
-    def read(self): return True, self.picam2.capture_array("main")
+        for _ in range(3):
+            self.picam2.capture_array("main")
+    def read(self):
+        return True, self.picam2.capture_array("main")
 
 class USBCamera:
     def __init__(self):
@@ -66,12 +70,14 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5): cap.read()
+                for _ in range(5):
+                    cap.read()
                 self.cap = cap
                 break
         if self.cap is None:
             raise RuntimeError("사용 가능한 USB 웹캠을 찾을 수 없습니다.")
-    def read(self): return self.cap.read()
+    def read(self):
+        return self.cap.read()
 
 class VideoFileCamera:
     def __init__(self, path):
@@ -81,6 +87,7 @@ class VideoFileCamera:
     def read(self):
         ret, frame = self.cap.read()
         if not ret:
+            # 파일 끝이면 처음으로
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self.cap.read()
         return ret, frame
@@ -113,68 +120,112 @@ def capture_and_process():
     while True:
         now = time.time()
         sleep = interval - (now - last)
-        if sleep > 0: time.sleep(sleep)
+        if sleep > 0:
+            time.sleep(sleep)
         last = time.time()
 
         ret, frame = camera.read()
-        if not ret: continue
+        if not ret:
+            continue
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad(): small = cv2.resize(frame, target_size); last_results = model(small)
-        if last_results is None: continue
+            with torch.no_grad():
+                small = cv2.resize(frame, target_size)
+                last_results = model(small)
+        if last_results is None:
+            continue
 
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
-        h_ratio = frame.shape[0] / target_size[1]; w_ratio = frame.shape[1] / target_size[0]
+        h_ratio = frame.shape[0] / target_size[1]
+        w_ratio = frame.shape[1] / target_size[0]
+
+        # 검출 결과 루프
         for *box, conf, cls in last_results.xyxy[0]:
-            x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
+            x1 = int(box[0] * w_ratio)
+            y1 = int(box[1] * h_ratio)
+            x2 = int(box[2] * w_ratio)
+            y2 = int(box[3] * h_ratio)
+
             label_en = last_results.names[int(cls)]
-            if label_en in label_map:
-                label_ko = label_map[label_en]
-                color = (255,0,0) if label_en=='car' else (0,0,255)
-                draw.rectangle([x1,y1,x2,y2], outline=color, width=2)
-                draw.text((x1, y1-30), label_ko, font=font, fill=color)
+            if label_en not in label_map:
+                continue
+
+            label_ko = label_map[label_en]
+            color = (255, 0, 0) if label_en == 'car' else (0, 0, 255)
+
+            # confidence 를 퍼센트 문자열로 변환
+            percent = f"{conf.item() * 100:.1f}%"
+            text = f"{label_ko} {percent}"
+
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+            draw.text((x1, y1 - 30), text, font=font, fill=color)
 
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
+
         if not frame_queue.empty():
-            try: frame_queue.get_nowait()
-            except: pass
+            try:
+                frame_queue.get_nowait()
+            except:
+                pass
         frame_queue.put(data)
 
+# 데몬 스레드로 시작
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# 6) Flask 앱
+# 6) Flask 앱 정의
 app = Flask(__name__)
+
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 def get_network_signal(interface='wlan0'):
     try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig', interface],
+                                      stderr=subprocess.DEVNULL).decode()
         for part in out.split():
-            if part.startswith('level='): return int(part.split('=')[1])
-    except: return None
+            if part.startswith('level='):
+                return int(part.split('=')[1])
+    except:
+        return None
 
 @app.route('/')
-def index(): return render_template('index.html')
+def index():
+    return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame', direct_passthrough=True)
-    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
+    resp = Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame',
+                    direct_passthrough=True)
+    resp.headers.update({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    })
     return resp
 
 @app.route('/stats')
 def stats():
-    cpu = psutil.cpu_percent(interval=0.5); mem = psutil.virtual_memory(); temp=None
-    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except: pass
+    cpu = psutil.cpu_percent(interval=0.5)
+    mem = psutil.virtual_memory()
+    temp = None
+    try:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except:
+        pass
     signal = get_network_signal('wlan0')
-    return jsonify({'cpu_percent':cpu,'memory_percent':mem.percent,'temperature_c':temp,'wifi_signal_dbm':signal})
+    return jsonify({
+        'cpu_percent': cpu,
+        'memory_percent': mem.percent,
+        'temperature_c': temp,
+        'wifi_signal_dbm': signal
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
