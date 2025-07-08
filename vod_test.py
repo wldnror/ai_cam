@@ -12,6 +12,7 @@ import time
 import threading
 import queue
 import subprocess
+import pickle
 
 import cv2
 import numpy as np
@@ -29,19 +30,13 @@ try:
 except Exception:
     pass
 
-# 1) PyTorch 최적화 및 모델 로드
+# 1) PyTorch 최적화
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
-def max_confidence(results):
-    """ 주어진 results 객체에서 최대 confidence 값을 반환합니다. """
-    if results is None or len(results.xyxy[0]) == 0:
-        return 0.0
-    return float(max([conf for *_, conf, _ in results.xyxy[0]]))
-
 # 2) 한국어 레이블 매핑 및 폰트 설정
-label_map = {'person': '사람', 'car': '자동차'}
+label_map = { 'person': '사람', 'car': '자동차' }
 font_paths = [
     '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf',
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
@@ -112,50 +107,64 @@ class VideoFileCamera:
 video_path = os.path.expanduser('~/Desktop/1.mp4')
 if os.path.isfile(video_path):
     camera = VideoFileCamera(video_path)
+    use_file = True
     print(f">>> 비디오 파일 사용: {video_path}")
 else:
     try:
         camera = CSICamera()
+        use_file = False
         print(">>> CSI 카메라 모듈 사용")
     except:
         camera = USBCamera()
+        use_file = False
         print(">>> USB 웹캠 사용")
 
-# 5) 프레임 처리 및 큐
+# 5) 캐시 설정: 메모리 + 임계값 기반 재추론
+D_CONF_THRESH = 0.50  # 캐시 사용 신뢰도 임계값 (50%)
+detection_cache = {}   # frame_idx -> (results, max_conf)
+
+# 6) 프레임 처리 및 큐
 frame_queue = queue.Queue(maxsize=1)
-detection_cache = {}  # frame_idx -> results
-CACHE_THRESHOLD = 0.5  # confidence 기준
 
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
     target_size = (320, 320)
-    frame_idx = 0
-    last_time = time.time()
+    skip_interval = 2
+    frame_count = 0
+    last_results = None
 
     while True:
-        # 프레임 속도 제어
-        now = time.time()
-        sleep = interval - (now - last_time)
-        if sleep > 0:
-            time.sleep(sleep)
-        last_time = time.time()
-
+        start = time.time()
         ret, frame = camera.read()
         if not ret:
             continue
-        frame_idx += 1
 
-        # 캐시 검사 후 조건에 따라 재추론
-        cached = detection_cache.get(frame_idx)
-        if cached is not None and max_confidence(cached) >= CACHE_THRESHOLD:
-            results = cached
+        frame_count += 1
+        # skip framing for 속도
+        if frame_count % skip_interval != 0 and last_results is not None:
+            results = last_results
         else:
-            small = cv2.resize(frame, target_size)
-            with torch.no_grad():
-                results = model(small)
-            # 캐시에 저장
-            detection_cache[frame_idx] = results
+            # 프레임 인덱스 획득
+            if use_file:
+                frame_idx = int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            else:
+                frame_idx = frame_count
+
+            # 캐시된 결과 존재 & 신뢰도 임계치 이상
+            if frame_idx in detection_cache and detection_cache[frame_idx][1] >= D_CONF_THRESH:
+                results = detection_cache[frame_idx][0]
+            else:
+                # 실제 추론
+                small = cv2.resize(frame, target_size)
+                with torch.no_grad():
+                    results = model(small)
+                # 최대 신뢰도 계산
+                confs = results.xyxy[0][:, 4]
+                max_conf = confs.max().item() if confs.numel() > 0 else 0.0
+                detection_cache[frame_idx] = (results, max_conf)
+
+        last_results = results
 
         # 라벨 그리기
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -163,7 +172,7 @@ def capture_and_process():
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
 
-        for *box, conf, cls in results.xyxy[0]:
+        for *box, conf, cls in last_results.xyxy[0]:
             if conf < 0.30:
                 continue
             x1, y1, x2, y2 = map(int, (
@@ -172,7 +181,7 @@ def capture_and_process():
                 box[2] * w_ratio,
                 box[3] * h_ratio
             ))
-            label_en = results.names[int(cls)]
+            label_en = last_results.names[int(cls)]
             if label_en in label_map:
                 label_ko = label_map[label_en]
                 percent = conf.item() * 100
@@ -181,9 +190,9 @@ def capture_and_process():
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
                 draw.text((x1, y1 - 30), text, font=font, fill=color)
 
-        # JPEG 인코딩 및 큐 삽입
-        frame_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        _, buf = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        # JPEG 변환 및 큐에 삽입
+        frame_out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+        _, buf = cv2.imencode('.jpg', frame_out, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
             try:
@@ -192,10 +201,14 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
-# 담당 스레드 시작
+        # fps 제어
+        elapsed = time.time() - start
+        time.sleep(max(0, interval - elapsed))
+
+# 데몬 스레드로 시작
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# 6) Flask 앱
+# 7) Flask 앱
 app = Flask(__name__)
 
 def generate():
@@ -203,15 +216,6 @@ def generate():
         frame = frame_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-def get_network_signal(interface='wlan0'):
-    try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except:
-        return None
 
 @app.route('/')
 def index():
@@ -238,7 +242,14 @@ def stats():
         temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except:
         pass
-    signal = get_network_signal('wlan0')
+    signal = None
+    try:
+        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        for part in out.split():
+            if part.startswith('level='):
+                signal = int(part.split('=')[1])
+    except:
+        pass
     return jsonify({
         'cpu_percent': cpu,
         'memory_percent': mem.percent,
@@ -247,4 +258,4 @@ def stats():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000
+    app.run(host='0.0.0.0', port=5000)
