@@ -35,15 +35,16 @@ torch.set_num_interop_threads(1)
 model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 
 # 2) 한국어 레이블 매핑 및 폰트 설정
-label_map = { 'person': '사람', 'car': '자동차' }
-default_font_path = '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf'
+label_map = {'person': '사람', 'car': '자동차'}
+# 실제 시스템에 설치된 한글 폰트 경로로 수정하세요.
+default_font_path = '/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf'
 try:
     font = ImageFont.truetype(default_font_path, 24)
 except OSError:
     print(f"⚠️ 폰트 파일을 찾지 못했습니다: {default_font_path}\n기본 폰트로 대체합니다.")
     font = ImageFont.load_default()
 
-# 3) 카메라 인터페이스
+# 3) 카메라 인터페이스 정의
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
@@ -87,7 +88,6 @@ class VideoFileCamera:
     def read(self):
         ret, frame = self.cap.read()
         if not ret:
-            # 파일 끝이면 처음으로
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self.cap.read()
         return ret, frame
@@ -114,20 +114,21 @@ def capture_and_process():
     target_size = (320, 320)
     skip_interval = 2
     frame_count = 0
-    last = time.time()
+    last_time = time.time()
     last_results = None
 
     while True:
         now = time.time()
-        sleep = interval - (now - last)
+        sleep = interval - (now - last_time)
         if sleep > 0:
             time.sleep(sleep)
-        last = time.time()
+        last_time = time.time()
 
         ret, frame = camera.read()
         if not ret:
             continue
         frame_count += 1
+
         if frame_count % skip_interval == 0:
             with torch.no_grad():
                 small = cv2.resize(frame, target_size)
@@ -140,7 +141,6 @@ def capture_and_process():
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
 
-        # 검출 결과 루프
         for *box, conf, cls in last_results.xyxy[0]:
             x1 = int(box[0] * w_ratio)
             y1 = int(box[1] * h_ratio)
@@ -154,7 +154,7 @@ def capture_and_process():
             label_ko = label_map[label_en]
             color = (255, 0, 0) if label_en == 'car' else (0, 0, 255)
 
-            # confidence 를 퍼센트 문자열로 변환
+            # confidence를 퍼센트 문자열로 변환
             percent = f"{conf.item() * 100:.1f}%"
             text = f"{label_ko} {percent}"
 
@@ -168,11 +168,10 @@ def capture_and_process():
         if not frame_queue.empty():
             try:
                 frame_queue.get_nowait()
-            except:
+            except queue.Empty:
                 pass
         frame_queue.put(data)
 
-# 데몬 스레드로 시작
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # 6) Flask 앱 정의
@@ -186,8 +185,7 @@ def generate():
 
 def get_network_signal(interface='wlan0'):
     try:
-        out = subprocess.check_output(['iwconfig', interface],
-                                      stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
             if part.startswith('level='):
                 return int(part.split('=')[1])
