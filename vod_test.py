@@ -39,8 +39,9 @@ except Exception:
 @atexit.register
 def save_on_exit():
     try:
+        # shallow copy to avoid concurrent modification issues
         with open(CACHE_PATH, 'wb') as f:
-            pickle.dump((detection_cache, repeat_count), f)
+            pickle.dump((detection_cache.copy(), repeat_count.copy()), f)
         print("💾 종료 직전 캐시 저장 완료")
     except Exception as e:
         print(f"⚠️ 캐시 저장 실패: {e}")
@@ -54,10 +55,10 @@ model_heavy  = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True).
 
 # 2) 캐시, 재생 횟수, 단계 설정
 STAGE_CONFIG = {
-    1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80},  # 초저해상도
-    2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},  # 저해상도
-    3: {'size': (640, 360),  'model': model_refine, 'thresh': 0.50},  # 중간해상도
-    4: {'size': (1280, 720), 'model': model_heavy,  'thresh': 0.50},  # 원본 해상도
+    1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80},
+    2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},
+    3: {'size': (640, 360),  'model': model_refine, 'thresh': 0.50},
+    4: {'size': (1280, 720), 'model': model_heavy,  'thresh': 0.50},
 }
 MAX_STAGE = 4
 skip_interval = 2
@@ -106,8 +107,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 for _ in range(5): cap.read()
-                self.cap = cap
-                break
+                self.cap = cap; break
         if not self.cap:
             raise RuntimeError("사용 가능한 USB 웹캠을 찾을 수 없습니다.")
     def read(self): return self.cap.read()
@@ -130,10 +130,8 @@ if os.path.isfile(video_path):
     camera, use_file = VideoFileCamera(video_path), True
     total_frames = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 else:
-    try:
-        camera, use_file = CSICamera(), False
-    except:
-        camera, use_file = USBCamera(), False
+    try: camera, use_file = CSICamera(), False
+    except: camera, use_file = USBCamera(), False
 print(f">>> {'비디오 파일' if use_file else '라이브 카메라'} 사용 중")
 if use_file:
     recorded = len(repeat_count)
@@ -144,11 +142,15 @@ if use_file:
 def periodic_save():
     while True:
         time.sleep(60)
-        with open(CACHE_PATH, 'wb') as f:
-            pickle.dump((detection_cache, repeat_count), f)
-        if use_file:
-            rec = len(repeat_count)
-            print(f"⌛ 중간저장: 기록 {rec}/{total_frames} 프레임")
+        try:
+            # shallow copy to avoid modification during iteration
+            with open(CACHE_PATH, 'wb') as f:
+                pickle.dump((detection_cache.copy(), repeat_count.copy()), f)
+            if use_file:
+                rec = len(repeat_count)
+                print(f"⌛ 중간저장: 기록 {rec}/{total_frames} 프레임")
+        except Exception as e:
+            print(f"⚠️ 주기적 캐시 저장 실패: {e}")
 
 threading.Thread(target=periodic_save, daemon=True).start()
 
@@ -163,8 +165,7 @@ def capture_and_process():
     while True:
         t0 = time.time()
         ret, frame = camera.read()
-        if not ret:
-            continue
+        if not ret: continue
 
         frame_count += 1
         if frame_count % skip_interval != 0 and last_results:
@@ -209,8 +210,7 @@ def capture_and_process():
 
         buf = cv2.imencode('.jpg', cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY),80])[1]
         data = buf.tobytes()
-        if not frame_queue.empty():
-            frame_queue.get_nowait()
+        if not frame_queue.empty(): frame_queue.get_nowait()
         frame_queue.put(data)
         time.sleep(max(0, interval - (time.time() - t0)))
 
@@ -226,8 +226,7 @@ def generate():
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
-def index():
-    return render_template('index.html')
+def index(): return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
@@ -240,25 +239,21 @@ def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
     temp = None
-    try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except:
-        pass
+    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except: pass
     signal = None
     try:
         out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
-            if part.startswith('level='):
-                signal = int(part.split('=')[1])
-    except:
-        pass
+            if part.startswith('level='): signal=int(part.split('=')[1])
+    except: pass
     return jsonify(cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=signal)
 
 @app.route('/progress')
 def progress():
     tot = int(camera.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if use_file else None
     rec = len(repeat_count)
-    rem = tot - rec if tot is not None else None
+    rem = tot-rec if tot is not None else None
     return jsonify(total_frames=tot, recorded_frames=rec, remaining_frames=rem)
 
 if __name__ == '__main__':
