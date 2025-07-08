@@ -37,7 +37,6 @@ model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).eval()
 # 2) 한국어 레이블 매핑 및 폰트 설정
 label_map = { 'person': '사람', 'car': '자동차' }
 
-# 시도할 한글 폰트 경로 목록
 font_paths = [
     '/usr/share/fonts/truetype/noto/NotoSansCJKkr-Regular.otf',
     '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
@@ -167,9 +166,12 @@ def capture_and_process():
             label_en = last_results.names[int(cls)]
             if label_en in label_map:
                 label_ko = label_map[label_en]
+                # confidence를 백분율로 변환하여 표시
+                percent = conf.item() * 100
+                text = f"{label_ko} {percent:.1f}%"
                 color = (255, 0, 0) if label_en == 'car' else (0, 0, 255)
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-                draw.text((x1, y1 - 30), label_ko, font=font, fill=color)
+                draw.text((x1, y1 - 30), text, font=font, fill=color)
 
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
