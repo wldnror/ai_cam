@@ -12,8 +12,6 @@ import time
 import threading
 import queue
 import subprocess
-import pickle
-import atexit
 
 import cv2
 import numpy as np
@@ -22,71 +20,14 @@ import psutil
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
-# 캐시 파일 경로
-CACHE_PATH = '/home/user/cache.pkl'
+# 디스크 기반 캐시 사용
+from diskcache import Cache
 
-# 락 객체 (디스크↔RAM 동기화 및 멀티스레드 접근 보호용)
+# 캐시 디렉터리 (필요시 권한 확인)
+DETECTION_CACHE = Cache('/home/user/cache_diskcache', size_limit=1e9)
+REPEAT_CACHE    = Cache('/home/user/repeat_cache',   size_limit=1e8)
+
 cache_lock = threading.Lock()
-
-# 0) 캐시 로드: 재부팅 후에도 사용
-try:
-    with open(CACHE_PATH, 'rb') as f:
-        detection_cache, repeat_count = pickle.load(f)
-    print("✅ 캐시 로드 완료")
-except Exception:
-    detection_cache = {}
-    repeat_count     = {}
-
-# 종료 직전 캐시 저장
-@atexit.register
-def save_on_exit():
-    try:
-        with cache_lock:
-            with open(CACHE_PATH, 'wb') as f:
-                pickle.dump((detection_cache, repeat_count), f)
-        print("💾 종료 직전 캐시 저장 완료")
-    except Exception as e:
-        print(f"⚠️ 캐시 저장 실패: {e}")
-
-# 진짜 주기적 저장: 60초마다 디스크에 덮어쓰기
-def periodic_save(interval_sec=60):
-    while True:
-        time.sleep(interval_sec)
-        try:
-            with cache_lock:
-                with open(CACHE_PATH, 'wb') as f:
-                    pickle.dump((detection_cache, repeat_count), f)
-            print("💾 주기적 캐시 저장 완료")
-        except Exception as e:
-            print(f"⚠️ 주기적 캐시 저장 실패: {e}")
-
-threading.Thread(
-    target=periodic_save,
-    args=(60,),    # 60초마다
-    daemon=True
-).start()
-
-# 디스크에서 주기적으로 캐시를 다시 로드하는 스레드 (5분마다)
-def reload_cache_periodically(interval_sec=300):
-    while True:
-        time.sleep(interval_sec)
-        try:
-            with open(CACHE_PATH, 'rb') as f:
-                new_cache, new_repeat = pickle.load(f)
-            with cache_lock:
-                detection_cache.clear()
-                detection_cache.update(new_cache)
-                repeat_count.clear()
-                repeat_count.update(new_repeat)
-            print(f"🔄 {interval_sec}s 후 캐시 리로드 완료")
-        except Exception as e:
-            print(f"⚠️ 캐시 리로드 실패: {e}")
-
-threading.Thread(
-    target=reload_cache_periodically,
-    args=(300,),  # 5분마다
-    daemon=True
-).start()
 
 # 1) PyTorch 모델 로드 (4단계)
 torch.set_num_threads(1)
@@ -95,7 +36,7 @@ model_fast   = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True).
 model_refine = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True).eval()
 model_heavy  = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True).eval()
 
-# 2) 캐시, 재생 횟수, 단계 설정
+# 2) 단계 설정
 STAGE_CONFIG = {
     1: {'size': (160, 90),   'model': model_fast,   'thresh': 0.80},
     2: {'size': (320, 180),  'model': model_fast,   'thresh': 0.65},
@@ -125,7 +66,8 @@ if font is None:
     print("⚠️ 사용할 한글 폰트를 찾지 못했습니다. 기본 폰트로 대체합니다.")
     font = ImageFont.load_default()
 
-# 4) 카메라 인터페이스 정의
+# 4) 카메라 인터페이스 정의 (생략, 기존 그대로)
+
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
@@ -203,10 +145,14 @@ def capture_and_process():
         else:
             with cache_lock:
                 frame_idx = int(camera.cap.get(cv2.CAP_PROP_POS_FRAMES)) if use_file else frame_count
-                repeat_count[frame_idx] = repeat_count.get(frame_idx, 0) + 1
-                desired_stage = min(repeat_count[frame_idx], MAX_STAGE)
 
-                cached = detection_cache.get(frame_idx)
+                # 조회 횟수 업데이트 (디스크 캐시)
+                count = REPEAT_CACHE.get(frame_idx, 0) + 1
+                REPEAT_CACHE.set(frame_idx, count)
+                desired_stage = min(count, MAX_STAGE)
+
+                # detection 캐시 조회
+                cached = DETECTION_CACHE.get(frame_idx)
                 use_cached = False
                 if cached:
                     _, _, cached_stage, cached_conf = cached
@@ -226,18 +172,21 @@ def capture_and_process():
                     confs = res.xyxy[0][:,4]
                     max_conf = confs.max().item() if confs.numel()>0 else 0.0
                     results, infer_size = res, cfg['size']
-                    detection_cache[frame_idx] = (results, infer_size, desired_stage, max_conf)
+                    DETECTION_CACHE.set(frame_idx, (results, infer_size, desired_stage, max_conf))
 
         last_results = (results, infer_size)
 
-        # 결과 그리기 및 인코딩
+        # 결과 그리기 및 인코딩 (기존 그대로)
         pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil)
         h_ratio = frame.shape[0] / infer_size[1]
         w_ratio = frame.shape[1] / infer_size[0]
         for *box, conf, cls in results.xyxy[0]:
             if conf < 0.20: continue
-            x1, y1, x2, y2 = map(int, (box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio))
+            x1, y1, x2, y2 = map(int, (
+                box[0]*w_ratio, box[1]*h_ratio,
+                box[2]*w_ratio, box[3]*h_ratio
+            ))
             label_en = results.names[int(cls)]
             label_ko = label_map.get(label_en)
             if label_ko:
@@ -260,7 +209,7 @@ def capture_and_process():
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# 7) Flask 앱
+# 7) Flask 앱 (기존 그대로)
 app = Flask(__name__)
 
 def generate():
