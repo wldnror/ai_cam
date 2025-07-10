@@ -4,38 +4,39 @@ from picamera2 import Picamera2
 from picamera2.devices import IMX500
 import cv2
 
-# 1) IMX500용 RPK 모델 경로
+# 1) IMX500 RPK 모델 경로
 MODEL_PATH = "/usr/share/imx500-models/" \
     "imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
 
-# 2) IMX500 디바이스 로드
+# 2) IMX500 디바이스 인스턴스화
 imx500 = IMX500(MODEL_PATH)
 
-# 3) Picamera2 객체 생성 (카메라 번호 지정)
+# 3) 네트워크 펌웨어를 먼저 로드 (업로드 완료 전까지 기다림)
+#    show_progress=True로 하면 터미널에 진행률이 표시됩니다.
+imx500.load_network_firmware(show_progress=True)
+
+# 4) Picamera2 객체 생성 (올바른 camera_num 지정)
 picam2 = Picamera2(imx500.camera_num)
 
-# 4) 프리뷰용 config 생성
+# 5) 프리뷰용 config 생성
 config = picam2.create_preview_configuration(
     main={"size": (640, 480)},
     controls={"FrameRate": imx500.network_intrinsics.inference_rate}
 )
 
-# 5) on-camera 파이프라인 지정 (JSON 파일)
+# 6) on-camera 파이프라인 설정 JSON 지정
 config["post_process_file"] = "/usr/share/rpi-camera-assets/" \
     "imx500_mobilenet_ssd.json"
-#    └─ rpicam-apps의 MobileNet-SSD 파이프라인 설정 파일 
 
-# 6) config 적용 및 카메라 시작
+# 7) config 적용 후 카메라 시작
 picam2.configure(config)
-imx500.show_network_fw_progress_bar()   # 펌웨어 로딩 진행 표시
-picam2.start()
+picam2.start()   # 펌웨어 업로드가 완료된 상태이므로 오류 없이 시작됩니다
 
-# 7) Flask 앱 설정
+# 8) Flask 앱 설정
 app = Flask(__name__)
 
 def gen_frames():
     while True:
-        # 이미 박스·라벨이 그려진 'main' 스트림 프레임을 가져옴
         frame = picam2.capture_array("main")
         ret, buf = cv2.imencode('.jpg', frame)
         if not ret:
