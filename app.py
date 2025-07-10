@@ -10,33 +10,33 @@ MODEL_PATH = "/usr/share/imx500-models/" \
 
 # 2) IMX500 디바이스 인스턴스화
 imx500 = IMX500(MODEL_PATH)
+intrinsics = imx500.network_intrinsics
 
-# 3) 네트워크 펌웨어를 먼저 로드 (업로드 완료 전까지 기다림)
-#    show_progress=True로 하면 터미널에 진행률이 표시됩니다.
-imx500.load_network_firmware(show_progress=True)
-
-# 4) Picamera2 객체 생성 (올바른 camera_num 지정)
+# 3) Picamera2 객체 생성
 picam2 = Picamera2(imx500.camera_num)
 
-# 5) 프리뷰용 config 생성
+# 4) 프리뷰용 config 생성
 config = picam2.create_preview_configuration(
     main={"size": (640, 480)},
-    controls={"FrameRate": imx500.network_intrinsics.inference_rate}
+    controls={"FrameRate": intrinsics.inference_rate}
 )
 
-# 6) on-camera 파이프라인 설정 JSON 지정
+# 5) on-camera 파이프라인 지정 JSON 파일
 config["post_process_file"] = "/usr/share/rpi-camera-assets/" \
     "imx500_mobilenet_ssd.json"
 
-# 7) config 적용 후 카메라 시작
-picam2.configure(config)
-picam2.start()   # 펌웨어 업로드가 완료된 상태이므로 오류 없이 시작됩니다
+# 6) 네트워크 펌웨어 업로드 진행 표시 (완료될 때까지 블록)
+imx500.show_network_fw_progress_bar()
+
+# 7) 카메라 시작 (config를 인자로 전달)
+picam2.start(config, show_preview=False)
 
 # 8) Flask 앱 설정
 app = Flask(__name__)
 
 def gen_frames():
     while True:
+        # 이미 바운딩 박스·라벨이 그려진 'main' 스트림 프레임 캡처
         frame = picam2.capture_array("main")
         ret, buf = cv2.imencode('.jpg', frame)
         if not ret:
@@ -50,8 +50,10 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    return Response(gen_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(
+        gen_frames(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
