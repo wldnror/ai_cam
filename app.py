@@ -1,56 +1,60 @@
 #!/usr/bin/env python3
-import os, subprocess
+import os
+import subprocess
 from aiohttp import web
-import aiohttp_cors
 
-# HLS 세그먼트 디렉터리
+# HLS 세그먼트가 생성될 디렉터리
 OUTPUT_DIR = "/home/user/ai_cam/hls"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 1) libcamera-vid → stdout H.264
+# 1) libcamera-vid → stdout H.264 → ffmpeg HLS 패키징
 rpicam = [
-  "libcamera-vid",
-  "--nopreview",                                  # ◀ 여기에 추가
-  "--timeout", "0",
-  "--post-process-file", "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json",
-  "--inline",
-  "--width", "1280", "--height", "720", "--framerate", "30",
-  "-o", "-"                                        # H.264를 STDOUT으로
+    "libcamera-vid",
+    "--nopreview",  # DRM 뷰파인더 윈도우를 띄우지 않음
+    "--timeout", "0",
+    "--post-process-file", "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json",
+    "--inline",
+    "--width", "1280", "--height", "720", "--framerate", "30",
+    "-o", "-"       # H.264 스트림을 stdout으로
 ]
-# 2) ffmpeg → HLS 패키징
 ffmpeg = [
-  "ffmpeg", "-hide_banner", "-loglevel", "error",
-  "-i", "pipe:0",              # libcamera-vid stdout
-  "-codec", "copy",            # 재인코딩 없이
-  "-f", "hls",
-  "-hls_time", "2",            # 2초 세그먼트
-  "-hls_list_size", "3",
-  "-hls_flags", "delete_segments",
-  os.path.join(OUTPUT_DIR, "stream.m3u8")
+    "ffmpeg", "-hide_banner", "-loglevel", "error",
+    "-i", "pipe:0",  # libcamera-vid stdout
+    "-codec", "copy",
+    "-f", "hls",
+    "-hls_time", "2",
+    "-hls_list_size", "3",
+    "-hls_flags", "delete_segments",
+    os.path.join(OUTPUT_DIR, "stream.m3u8")
 ]
 
-# 백그라운드로 파이프라인 시작
 proc_cam = subprocess.Popen(rpicam, stdout=subprocess.PIPE)
 proc_hls = subprocess.Popen(ffmpeg, stdin=proc_cam.stdout)
 
-# 3) aiohttp 웹서버
+# 2) aiohttp로 HLS 디렉터리와 index 페이지 서빙
 async def index(request):
     return web.Response(text="""
-<html><body style="margin:0;text-align:center;">
-  <h1>AI 카메라 HLS 스트리밍</h1>
-  <video controls autoplay muted style="width:100%;height:auto;"
-         src="/hls/stream.m3u8" type="application/vnd.apple.mpegurl">
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI 카메라 HLS 스트리밍</title>
+  <style>body{margin:0;text-align:center;}video{width:100%;height:auto;}</style>
+</head>
+<body>
+  <h1>On-sensor 객체 감지 스트림</h1>
+  <video controls autoplay muted type="application/vnd.apple.mpegurl"
+         src="/hls/stream.m3u8">
     브라우저가 HLS를 지원하지 않습니다.
   </video>
-</body></html>
+</body>
+</html>
 """, content_type='text/html')
 
 app = web.Application()
-# CORS 허용 (필요시)
-cors = aiohttp_cors.setup(app)
-res = app.router.add_static('/hls', OUTPUT_DIR)
-aiohttp_cors.add(res, {"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")})
+# /hls 경로로 OUTPUT_DIR 내부 파일들(static) 서빙
+app.router.add_static('/hls', OUTPUT_DIR, name='hls')
 app.router.add_get('/', index)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=8000)
