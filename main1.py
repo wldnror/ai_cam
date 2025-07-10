@@ -3,9 +3,9 @@ import warnings
 warnings.filterwarnings("ignore")  # 모든 파이썬 경고 억제
 
 import logging
-logging.getLogger('ultralytics').setLevel(logging.WARNING)  # yolov5 허브 로깅 억제
+logging.getLogger('ultralytics').setLevel(logging.WARNING)
 logging.getLogger('torch').setLevel(logging.WARNING)
-werkzeug_log = logging.getLogger('werkzeug')  # Flask 요청 로그 억제
+werkzeug_log = logging.getLogger('werkzeug')
 werkzeug_log.setLevel(logging.ERROR)
 
 import os
@@ -21,39 +21,42 @@ import psutil
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화 (X가 있을 때만)
+# 0) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
         os.system('xset s off; xset s noblank; xset -dpms')
         print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
-except Exception:
+except:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) PyTorch 스레드 & 추론 모드 최적화
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
-model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
+# 1) 모델 로드
+# (1) 캐시 폴더 삭제하여 깨끗하게
+#    $ rm -rf ~/.cache/torch/hub/ultralytics_yolov5_master
+# (2) force_reload=True 로 강제 재로딩
+model = torch.hub.load(
+    'ultralytics/yolov5',
+    'yolov5n',
+    pretrained=True,
+    force_reload=True
+)
 model.eval()
+print(f"YOLOv5 loaded on {model.device}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 인터페이스 정의
+# 2) CSI 카메라 정의 (Picamera2 + libcamera)
 class CSICamera:
-    """Raspberry Pi CSI 카메라 모듈을 Picamera2로 제어 (무조건 사용)"""
     def __init__(self):
         try:
             from picamera2 import Picamera2
         except ModuleNotFoundError:
             sys.exit(
-                "ERROR: picamera2/libcamera Python 모듈을 찾을 수 없습니다.\n"
-                "다음 명령으로 설치 후 다시 시도하세요:\n"
-                "  sudo apt update\n"
-                "  sudo apt install -y python3-picamera2 libcamera-apps\n"
-                "그리고 venv 대신 시스템 파이썬, 또는 venv 생성 시 --system-site-packages 옵션을 사용하세요."
+                "ERROR: picamera2/libcamera 모듈을 찾을 수 없습니다.\n"
+                "sudo apt install -y python3-picamera2 libcamera-apps\n"
+                "혹은 venv 생성 시 --system-site-packages 옵션을 사용하세요."
             )
         self.picam2 = Picamera2()
-        # 프리뷰에 적합한 설정 사용
         config = self.picam2.create_preview_configuration(
             main         = {"format": "XRGB8888", "size": (1280, 720)},
             lores        = {"format": "XRGB8888", "size": (640, 360)},
@@ -61,29 +64,28 @@ class CSICamera:
         )
         self.picam2.configure(config)
         self.picam2.start()
-        # 버퍼 워밍업
         for _ in range(3):
             self.picam2.capture_array("main")
 
     def read(self):
         return True, self.picam2.capture_array("main")
 
-# CSI 모듈 강제 사용
+# CSI 카메라만 강제 사용
 camera = CSICamera()
-print(">>> Forcing CSI camera module")
+print(">>> Using CSI camera")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 백그라운드 프레임 처리 스레드 + 큐
+# 3) 백그라운드 처리
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
-    fps = 10                          # OPT ▶︎ FPS 조정
+    fps = 10
     interval = 1.0 / fps
-    target_size = (320, 320)          # OPT ▶︎ 해상도 조정
-    skip_interval = 2                 # OPT ▶︎ 프레임 스킵
+    target_size = (320, 320)
+    skip_interval = 2
     frame_count = 0
-    last = time.time()
     last_results = None
+    last = time.time()
 
     while True:
         now = time.time()
@@ -105,7 +107,6 @@ def capture_and_process():
         if last_results is None:
             continue
 
-        # 박스 그리기
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
@@ -122,11 +123,9 @@ def capture_and_process():
                 cv2.putText(frame, label, (x1, y1-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
 
-        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
             try: frame_queue.get_nowait()
             except queue.Empty: pass
@@ -135,7 +134,7 @@ def capture_and_process():
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 & 스트리밍 + 통계 엔드포인트
+# 4) Flask 앱
 app = Flask(__name__)
 
 def generate():
@@ -143,15 +142,6 @@ def generate():
         frame = frame_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-def get_network_signal(interface='wlan0'):
-    try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except Exception:
-        return None
 
 @app.route('/')
 def index():
@@ -175,9 +165,16 @@ def stats():
     try:
         with open('/sys/class/thermal/thermal_zone0/temp') as f:
             temp = float(f.read()) / 1000.0
-    except Exception:
+    except:
         pass
-    signal = get_network_signal('wlan0')
+    signal = None
+    try:
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
+        for part in out.split():
+            if part.startswith('level='):
+                signal = int(part.split('=')[1])
+    except:
+        pass
     return jsonify({
         'cpu_percent': cpu,
         'memory_percent': mem.percent,
