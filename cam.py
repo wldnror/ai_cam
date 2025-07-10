@@ -33,7 +33,7 @@ class CSICamera:
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         config = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2
+            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=1
         )
         self.picam2.configure(config)
         self.picam2.start()
