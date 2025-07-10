@@ -77,11 +77,12 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# CSI 우선, USB 대체
+# CSI 우선, USB 대체 (예외 메시지 출력 추가)
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
-except Exception:
+except Exception as e:
+    print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     camera = USBCamera()
     print(">>> Using USB webcam")
 
