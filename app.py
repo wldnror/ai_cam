@@ -1,42 +1,41 @@
-#!/usr/bin/env python3
 from flask import Flask, Response, render_template
 from picamera2 import Picamera2
 from picamera2.devices import IMX500
 import cv2
 
-# 1) IMX500용 RPK 모델 경로
-MODEL_PATH = "/usr/share/imx500-models/" \
-    "imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
-
-# 2) IMX500 디바이스 로드
-imx500 = IMX500(MODEL_PATH)
-
-# 3) Picamera2 객체 생성 (카메라 번호 지정)
+# IMX500 모델 로드
+imx500 = IMX500("/usr/share/imx500-models/imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk")
 picam2 = Picamera2(imx500.camera_num)
 
-# 4) 프리뷰용 config 생성
-config = picam2.create_preview_configuration(
-    main={"size": (640, 480)},
-    controls={"FrameRate": imx500.network_intrinsics.inference_rate}
-)
-
-# 5) on-camera 파이프라인 지정 (JSON 파일)
-config["post_process_file"] = "/usr/share/rpi-camera-assets/" \
-    "imx500_mobilenet_ssd.json"
-#    └─ rpicam-apps의 MobileNet-SSD 파이프라인 설정 파일 
-
-# 6) config 적용 및 카메라 시작
+# 프리뷰 + 추론 설정
+config = picam2.create_preview_configuration(main={"size": (640, 480)},
+                                             controls={"FrameRate": imx500.network_intrinsics.inference_rate})
+config["post_process_file"] = "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json"
 picam2.configure(config)
-imx500.show_network_fw_progress_bar()   # 펌웨어 로딩 진행 표시
 picam2.start()
 
-# 7) Flask 앱 설정
 app = Flask(__name__)
 
 def gen_frames():
     while True:
-        # 이미 박스·라벨이 그려진 'main' 스트림 프레임을 가져옴
-        frame = picam2.capture_array("main")
+        # 프레임 + 메타데이터 동시 획득
+        request = picam2.capture_request()
+        frame = request.make_image("main")  # 오버레이 없이 원본
+        metadata = request.get_metadata()
+        request.release()
+
+        # 메타데이터에서 박스/레이블 정보 파싱
+        dets = metadata.get("Inference", {}).get("objects", [])
+        for obj in dets:
+            # obj 구조는 JSON 파이프라인에 따라 달라집니다.
+            x1, y1, x2, y2 = obj["bbox"]
+            label = obj["label_text"]
+            score = obj["score"]
+            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0,255,0), 2)
+            cv2.putText(frame, f"{label} {score:.2f}", (int(x1), int(y1)-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+
+        # JPEG 인코딩 및 스트리밍
         ret, buf = cv2.imencode('.jpg', frame)
         if not ret:
             continue
