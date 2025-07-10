@@ -1,23 +1,25 @@
-# ai_stream.py
+# ai_stream_picamera2.py 예시
 from flask import Flask, Response
+from picamera2 import Picamera2, Preview
 import cv2
 
 app = Flask(__name__)
 
 def gen_frames():
-    cap = cv2.VideoCapture(0)             # CSI 카메라: device 0
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    picam2 = Picamera2()
+    config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (640, 480)})
+    picam2.configure(config)
+    picam2.start()
     while True:
-        success, frame = cap.read()       # 프레임 읽기
-        if not success:
-            break
-        # ★여기에 rpicam-hello --headless와 연동하거나
-        #   Picamera2 API로 후처리(객체인식/포즈추정) 적용 가능
+        frame = picam2.capture_array()            # NumPy 배열(RGB)
+        # ★ 여기에 AI 후처리(객체 인식 등)를 Picamera2의 post_callback으로 넣어도 됩니다.
+        # OpenCV는 BGR 순서이니 변환
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         ret, buf = cv2.imencode('.jpg', frame)
-        frame_bytes = buf.tobytes()
+        if not ret:
+            continue
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
 
 @app.route('/video_feed')
 def video_feed():
@@ -26,7 +28,6 @@ def video_feed():
 
 @app.route('/')
 def index():
-    # 브라우저에서 바로 영상이 보이도록 간단한 HTML
     return """
     <html><body>
     <h1>AI Camera Live</h1>
@@ -35,4 +36,4 @@ def index():
     """
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    app.run(host='0.0.0.0', port=5000)
