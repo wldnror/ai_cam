@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 import warnings
 warnings.filterwarnings("ignore")  # 경고 억제
@@ -76,7 +75,7 @@ def generate():
 
 @app.route('/')
 def index():
-    return render_template('index.html')  # 적절한 템플릿 준비 필요
+    return render_template('index.html')  # index.html 파일에 <img src="/video_feed"> 추가
 
 @app.route('/video_feed')
 def video_feed():
@@ -87,4 +86,3 @@ def video_feed():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-```
