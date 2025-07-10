@@ -1,78 +1,82 @@
 #!/usr/bin/env python3
 import os
+import glob
 import time
 import threading
 import queue
 import subprocess
 import psutil
-import cv2
 from flask import Flask, Response, render_template, jsonify
 
 # ──────────────────────────────────────────────────────────────────────────────
-# framebuffer 절전/DPMS 무시 (콘솔에서는 동작 안 해도 무시)
+# 절전/DPMS 방지
 try:
     os.system('setterm -blank 0 -powerdown 0 -powersave off')
 except:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) FBDevCamera: /dev/fb0 → ffmpeg → MJPEG pipe
+# 1) FBDevCamera: /dev/fb* 자동 탐색 → ffmpeg MJPEG pipe
 class FBDevCamera:
     def __init__(self, width=1280, height=720, fps=10):
+        # 사용 가능한 fb 장치 찾기
+        fbs = glob.glob('/dev/fb*')
+        if not fbs:
+            raise RuntimeError("No framebuffer device found")
+        # HDMI 쪽이 fb1 이면 fb1을 우선, 아니면 첫 번째
+        fbdev = '/dev/fb1' if '/dev/fb1' in fbs else fbs[0]
+        print(f">>> Opening framebuffer {fbdev}")
+
         cmd = [
             'ffmpeg',
             '-f', 'fbdev',
             '-framerate', str(fps),
             '-video_size', f'{width}x{height}',
-            '-i', '/dev/fb0',
+            '-i', fbdev,
             '-vf', f'scale={width}:{height}',
             '-q:v', '5',
             '-f', 'mjpeg',
             'pipe:1'
         ]
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        # bufsize=0 로 하면 chunk read 과실 줄어듭니다
+        self.proc = subprocess.Popen(cmd,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL,
+                                     bufsize=0)
         self.buffer = b''
 
     def read(self):
-        # stdout 에서 JPEG 단위로 읽기
+        # stdout에서 JPEG SOI/EOI로 자르기
         while True:
-            chunk = self.proc.stdout.read(1024)
+            chunk = self.proc.stdout.read(4096)
             if not chunk:
                 return False, None
             self.buffer += chunk
-            start = self.buffer.find(b'\xff\xd8')  # SOI
-            end   = self.buffer.find(b'\xff\xd9')  # EOI
+            start = self.buffer.find(b'\xff\xd8')
+            end   = self.buffer.find(b'\xff\xd9')
             if start != -1 and end != -1 and end > start:
                 jpg = self.buffer[start:end+2]
                 self.buffer = self.buffer[end+2:]
-                # 디코딩 확인 (선택)
-                img = cv2.imdecode(
-                    np.frombuffer(jpg, dtype=np.uint8),
-                    cv2.IMREAD_COLOR
-                )
-                return True, img
+                return True, jpg  # 이미 JPEG 바이트
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 카메라 객체: FBDevCamera 만 사용
+# camera 객체는 오직 FBDevCamera
 camera = FBDevCamera(width=1280, height=720, fps=10)
-print(">>> Using framebuffer camera via ffmpeg")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 백그라운드 캡처 + 큐
+# 2) 캡처 스레드 + 큐
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_loop():
     while True:
-        ret, frame = camera.read()
+        ret, jpg = camera.read()
         if not ret:
             continue
-        # JPEG 재인코딩 (품질 80)
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        data = buf.tobytes()
+        # 이미 JPEG이므로 바로 큐에 넣기
         if not frame_queue.empty():
             try: frame_queue.get_nowait()
             except queue.Empty: pass
-        frame_queue.put(data)
+        frame_queue.put(jpg)
 
 threading.Thread(target=capture_loop, daemon=True).start()
 
@@ -104,12 +108,13 @@ def stats():
     temp = None
     try:
         with open('/sys/class/thermal/thermal_zone0/temp') as f:
-            temp = float(f.read()) / 1000.0
+            temp = float(f.read())/1000.0
     except:
         pass
     signal = None
     try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig','wlan0'],
+                                      stderr=subprocess.DEVNULL).decode()
         for part in out.split():
             if part.startswith('level='):
                 signal = int(part.split('=')[1])
@@ -122,11 +127,10 @@ def stats():
         'wifi_signal_dbm': signal
     })
 
-if __name__ == '__main__':
-    # gevent 사용 시
+if __name__=='__main__':
+    # gevent가 설치되어 있다면
     # from gevent.pywsgi import WSGIServer
-    # http_server = WSGIServer(('0.0.0.0', 5000), app)
-    # http_server.serve_forever()
+    # WSGIServer(('0.0.0.0',5000), app).serve_forever()
 
-    # 일반 Flask
+    # 기본 Flask
     app.run(host='0.0.0.0', port=5000)
