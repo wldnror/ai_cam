@@ -31,10 +31,8 @@ except:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) 모델 로드
-# (1) 캐시 폴더 삭제하여 깨끗하게
-#    $ rm -rf ~/.cache/torch/hub/ultralytics_yolov5_master
-# (2) force_reload=True 로 강제 재로딩
+# 1) 모델 로드 (force_reload 로 weights_only 이슈 우회)
+#    캐시를 지운 뒤 실행하세요: rm -rf ~/.cache/torch/hub/ultralytics_yolov5_master
 model = torch.hub.load(
     'ultralytics/yolov5',
     'yolov5n',
@@ -42,7 +40,7 @@ model = torch.hub.load(
     force_reload=True
 )
 model.eval()
-print(f"YOLOv5 loaded on {model.device}")
+print("YOLOv5 모델 로드 완료")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) CSI 카메라 정의 (Picamera2 + libcamera)
@@ -70,12 +68,12 @@ class CSICamera:
     def read(self):
         return True, self.picam2.capture_array("main")
 
-# CSI 카메라만 강제 사용
+# CSI 카메라만 사용
 camera = CSICamera()
-print(">>> Using CSI camera")
+print(">>> CSI 카메라 사용 중")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 백그라운드 처리
+# 3) 백그라운드 프레임 처리 스레드 + 큐
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
@@ -134,7 +132,7 @@ def capture_and_process():
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱
+# 4) Flask 앱 & 엔드포인트
 app = Flask(__name__)
 
 def generate():
