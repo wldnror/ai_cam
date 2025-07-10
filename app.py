@@ -12,25 +12,28 @@ imx500 = IMX500(MODEL_PATH)
 # — 2) Picamera2 객체 생성 —
 picam2 = Picamera2(imx500.camera_num)
 
-# — 3) lores 스트림에만 on-sensor 파이프라인 붙이기 —
+# — 3) Preview(lores) + main 설정 (스트림별 키만) —
 config = picam2.create_preview_configuration(
-    lores={                  # 뷰파인더용 스트림
-        "size": (1280, 720),
-        "post_process_file": "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json"
+    lores={                  # viewfinder 해상도
+        "size": (1280, 720)
     },
-    main={                    # (필요하다면) 고해상도 캡처용
+    main={                    # (필요시) 고해상도 캡처
         "size": (1280, 720)
     },
     controls={
-        # 센서 추론 속도에 맞춰
+        # 센서 추론 속도에 맞춤
         "FrameRate": imx500.network_intrinsics.inference_rate
     }
 )
 
+# — 4) on-sensor JSON 파이프라인 지정(전체 config에 추가!) —
+config["post_process_file"] = "/usr/share/rpi-camera-assets/imx500_mobilenet_ssd.json"
+
+# — 5) 설정 적용 및 카메라 시작 —
 picam2.configure(config)
 picam2.start()
 
-# — 4) Flask 앱 정의 —
+# — 6) Flask 앱 정의 —
 app = Flask(__name__)
 HTML = """
 <!DOCTYPE html>
@@ -52,9 +55,9 @@ def index():
     return render_template_string(HTML)
 
 def gen_frames():
-    """lores 스트림(viewfinder)에 이미 그려진 박스+레이블을 가져와 MJPEG으로 스트리밍"""
+    """lores 스트림(viewfinder 결과)을 JPEG로 인코딩해 MJPEG 스트림으로 전송"""
     while True:
-        # 이제 'lores'에는 on-sensor가 그려준 결과가 그대로 들어옵니다!
+        # 'lores'에는 on-sensor가 그려준 박스+레이블이 포함되어 있습니다
         frame = picam2.capture_array("lores")
         ret, buf = cv2.imencode(".jpg", frame)
         if not ret:
