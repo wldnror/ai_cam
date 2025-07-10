@@ -24,7 +24,7 @@ intrinsics.update_with_defaults()
 # — Picamera2 구성 (on-camera post-processing 포함) —
 picam2 = Picamera2(imx500.camera_num)
 config = picam2.create_preview_configuration(
-    main={"size": (640, 480), "format": "RGB888"},      # RGB888 포맷으로 받아와서
+    main={"size": (1920, 1080), "format": "RGB888"},      # RGB888 포맷으로 받아와서
     controls={"FrameRate": intrinsics.inference_rate},
     post_process_file=JSON_PIPELINE                     # on-camera 박스+라벨
 )
