@@ -9,6 +9,7 @@ werkzeug_log = logging.getLogger('werkzeug')  # Flask 요청 로그 억제
 werkzeug_log.setLevel(logging.ERROR)
 
 import os
+import sys
 import time
 import threading
 import queue
@@ -41,7 +42,16 @@ model.eval()
 class CSICamera:
     """Raspberry Pi CSI 카메라 모듈을 Picamera2로 제어 (무조건 사용)"""
     def __init__(self):
-        from picamera2 import Picamera2
+        try:
+            from picamera2 import Picamera2
+        except ModuleNotFoundError:
+            sys.exit(
+                "ERROR: picamera2/libcamera Python 모듈을 찾을 수 없습니다.\n"
+                "다음 명령으로 설치 후 다시 시도하세요:\n"
+                "  sudo apt update\n"
+                "  sudo apt install -y python3-picamera2 libcamera-apps\n"
+                "그리고 venv 대신 시스템 파이썬, 또는 venv 생성 시 --system-site-packages 옵션을 사용하세요."
+            )
         self.picam2 = Picamera2()
         # 프리뷰에 적합한 설정 사용
         config = self.picam2.create_preview_configuration(
@@ -88,7 +98,7 @@ def capture_and_process():
 
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad():     # OPT ▶︎ no_grad()
+            with torch.no_grad():
                 small = cv2.resize(frame, target_size)
                 last_results = model(small)
 
@@ -118,10 +128,8 @@ def capture_and_process():
 
         # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
+            try: frame_queue.get_nowait()
+            except queue.Empty: pass
         frame_queue.put(data)
 
 threading.Thread(target=capture_and_process, daemon=True).start()
@@ -161,7 +169,6 @@ def video_feed():
 
 @app.route('/stats')
 def stats():
-    cam_no = request.args.get('cam', default=1, type=int)
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory()
     temp = None
@@ -172,7 +179,6 @@ def stats():
         pass
     signal = get_network_signal('wlan0')
     return jsonify({
-        'camera': cam_no,
         'cpu_percent': cpu,
         'memory_percent': mem.percent,
         'temperature_c': temp,
