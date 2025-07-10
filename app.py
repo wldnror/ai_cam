@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ㅂㅂㅂ#!/usr/bin/env python3
 from flask import Flask, Response, render_template
 from picamera2 import Picamera2
 import cv2
