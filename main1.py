@@ -23,7 +23,9 @@ try:
     picam2 = Picamera2()
     # Preview용 설정: 자동으로 BGR888 포맷을 반환해서 OpenCV에서 바로 사용 가능
     config = picam2.create_preview_configuration(
-        main={"size": (1280, 720)},
+        main={"size": (1280, 720), "format": "BGR888"},
+        lores={"size": (640, 360)}
+    )},
         lores={"size": (640, 360)},
         display=False
     )
