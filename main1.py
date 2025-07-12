@@ -5,8 +5,8 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 import os
 import sys
 import cv2
-from picamera2 import Picamera2
 from flask import Flask, Response
+from picamera2 import Picamera2
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
 try:
@@ -17,19 +17,23 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Preview Configuration 사용)
+# 1) CSI 카메라 초기화 (RGB888 포맷) 및 자동 화이트밸런스 설정
 try:
     picam2 = Picamera2()
-    config = picam2.create_preview_configuration(
-        main={"size": (1280, 720), "format": "BGR888"},
-        lores={"size": (640, 360)}
+    config = picam2.create_video_configuration(
+        main={"size": (1280, 720), "format": "RGB888"},
+        lores=None,
+        buffer_count=2
     )
     picam2.configure(config)
+    picam2.set_controls({
+        "AwbEnable": True,    # 자동 화이트 밸런스
+        "AeEnable": True      # 자동 노출
+    })
     picam2.start()
     # 워밍업 프레임
-    for _ in range(5):
-        picam2.capture_array("main")
-    print(">>> Using CSI camera preview configuration (BGR888)")
+    for _ in range(3): picam2.capture_array("main")
+    print(">>> Using CSI camera module (RGB888, AWB/Ae enabled)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -44,10 +48,11 @@ def stream():
         boundary = b'--frame\r\n'
         header = b'Content-Type: image/jpeg\r\n\r\n'
         while True:
-            # Preview configuration은 BGR888 ndarray를 반환
+            # RGB888 ndarray 반환
             frame = picam2.capture_array("main")
-            # JPEG 인코딩
-            ret, jpg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            # OpenCV는 BGR 순서이므로 변환
+            bgr = frame[..., ::-1]
+            ret, jpg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
                 continue
             data = jpg.tobytes()
