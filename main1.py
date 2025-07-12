@@ -39,10 +39,10 @@ try:
                     pass
             frame_queue.put(buf)
 
-    # quality는 지원하지 않으므로 기본 설정 사용
+    # MJPEG 인코더 생성 및 녹화 시작
     encoder = MJPEGEncoder()
-    picam2.start_recording(encoder, FrameWriter())
     picam2.start()
+    picam2.start_recording(encoder=encoder, output=FrameWriter())
     print(">>> Using CSI camera MJPEG stream")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
