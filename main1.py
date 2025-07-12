@@ -45,7 +45,7 @@ class CSICamera:
         self.picam2 = Picamera2()
         config = self.picam2.create_video_configuration(
             main         = {"size": (1280, 720)},
-            lores        = {"size": (640, 360)},
+            lores        = {"size": (320, 180)},
             buffer_count = 2
         )
         self.picam2.configure(config)
@@ -93,7 +93,7 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10                          # OPT ▶︎ FPS 조정
     interval = 1.0 / fps
-    target_size = (320, 320)          # OPT ▶︎ 해상도 조정
+    target_size = (150, 150)          # OPT ▶︎ 해상도 조정
     skip_interval = 2                 # OPT ▶︎ 프레임 스킵
     frame_count = 0
     last = time.time()
