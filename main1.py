@@ -50,32 +50,6 @@ class FrameWriter:
             pass
 
 # 녹화 시작 (MJPEGStream)
-picam2.start_recording(picam2.streams.main, FrameWriter())
-
-# Flask 앱 설정
-app = Flask(__name__)
-
-# 스트림 생성기
-boundary = b'--frame\r\n'
-header = b'Content-Type: image/jpeg\r\n\r\n'
-def generate():
-    while True:
-        buf = frame_queue.get()
-        yield boundary + header + buf + b'\r\n'
-
-# HTML 페이지 제공
-@app.route('/')
-def index():
-    return ('<html><head><title>CSI Camera Stream</title></head>'
-            '<body><h1>CSI Camera MJPEG Stream</h1>'
-            '<img src="/stream" style="width:100%;" />'
-            '</body></html>')
-
-# MJPEG 스트림 엔드포인트
-@app.route('/stream')
-def stream():
-    return Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    encoder = None  # 사용 안 함
+    # 기본 main 스트림으로 MJPEG 스트림 기록
+    picam2.start_recording(FrameWriter())
