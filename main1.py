@@ -64,8 +64,8 @@ class USBCamera:
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 for _ in range(5):
                     cap.read()
@@ -93,7 +93,7 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10                          # OPT ▶︎ FPS 조정
     interval = 1.0 / fps
-    target_size = (320, 320)          # OPT ▶︎ 해상도 조정
+    target_size = (150, 150)          # OPT ▶︎ 해상도 조정
     skip_interval = 2                 # OPT ▶︎ 프레임 스킵
     frame_count = 0
     last = time.time()
