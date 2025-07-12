@@ -17,7 +17,7 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (MJPEG 포맷 사용)
+# 1) CSI 카메라 초기화 (MJPEG 포맷)
 try:
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
@@ -35,21 +35,49 @@ except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
 
-# 프레임 메시 저장용 큐
+# 2) 프레임 저장용 큐
 frame_queue = queue.Queue(maxsize=1)
 
-# 버퍼 읽기 쓰기 핸들러
+# 3) FrameWriter 클래스 정의
 class FrameWriter:
+    """Picamera2 MJPEG 스트림을 캡처해 큐에 저장"""
     def write(self, buf):
-        # buf may be memoryview or bytes
         try:
             data = buf.tobytes() if hasattr(buf, 'tobytes') else bytes(buf)
-            if not frame_queue.empty(): frame_queue.get_nowait()
+            if not frame_queue.empty():
+                frame_queue.get_nowait()
             frame_queue.put(data)
         except Exception:
             pass
 
-# 녹화 시작 (MJPEGStream)
-    encoder = None  # 사용 안 함
-    # 기본 main 스트림으로 MJPEG 스트림 기록
-    picam2.start_recording(FrameWriter())
+# 4) MJPEG 녹화 시작
+picam2.start_recording(FrameWriter())
+
+# 5) Flask 앱 설정
+app = Flask(__name__)
+
+# MJPEG 스트림 생산기
+def generate():
+    boundary = b'--frame\r\n'
+    header = b'Content-Type: image/jpeg\r\n\r\n'
+    while True:
+        buf = frame_queue.get()
+        yield boundary + header + buf + b'\r\n'
+
+# HTML 페이지 제공
+@app.route('/')
+def index():
+    return (
+        '<html><head><title>CSI Camera Stream</title></head>'
+        '<body><h1>CSI Camera MJPEG Stream</h1>'
+        '<img src="/stream" style="width:100%;" />'
+        '</body></html>'
+    )
+
+# MJPEG 스트림 엔드포인트
+@app.route('/stream')
+def stream():
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
