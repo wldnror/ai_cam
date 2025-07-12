@@ -93,7 +93,7 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10                          # OPT ▶︎ FPS 조정
     interval = 1.0 / fps
-    target_size = (150, 150)          # OPT ▶︎ 해상도 조정
+    target_size = (500, 500)          # OPT ▶︎ 해상도 조정
     skip_interval = 2                 # OPT ▶︎ 프레임 스킵
     frame_count = 0
     last = time.time()
