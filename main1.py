@@ -5,8 +5,8 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 import os
 import sys
 import subprocess
-from picamera2 import Picamera2
 import cv2
+from picamera2 import Picamera2
 from flask import Flask, Response
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
@@ -18,20 +18,21 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (RGB888 포맷)
+# 1) CSI 카메라 초기화 (Preview Configuration 사용)
 try:
     picam2 = Picamera2()
-    config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "RGB888"},
+    # Preview용 설정: 자동으로 BGR888 포맷을 반환해서 OpenCV에서 바로 사용 가능
+    config = picam2.create_preview_configuration(
+        main={"size": (1280, 720)},
         lores={"size": (640, 360)},
-        buffer_count=2
+        display=False
     )
     picam2.configure(config)
     picam2.start()
     # 워밍업 프레임
-    for _ in range(3):
+    for _ in range(5):
         picam2.capture_array("main")
-    print(">>> Using CSI camera module (RGB888)")
+    print(">>> Using CSI camera preview configuration (BGR888)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -43,28 +44,26 @@ app = Flask(__name__)
 @app.route('/stream')
 def stream():
     def generate():
+        boundary = b'--frame\r\n'
+        header = b'Content-Type: image/jpeg\r\n\r\n'
         while True:
-            # RAW RGB 프레임 가져오기
+            # Preview config는 BGR 순서 ndarray 반환
             frame = picam2.capture_array("main")
-            # OpenCV는 BGR 입력, 배열 뒤집기
-            bgr = frame[..., ::-1]
-            # JPEG 인코딩
-            ret, jpg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            # 바로 JPEG 인코딩
+            ret, jpg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
                 continue
             data = jpg.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
+            yield boundary + header + data + b'\r\n'
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# 4) 간단한 HTML 페이지
+# 4) 간단 HTML 페이지
 @app.route('/')
 def index():
     return (
         '<html><head><title>CSI Camera Stream</title></head>'
-        '<body>'
-        '<h1>CSI Camera MJPEG Stream</h1>'
-        '<img src="/stream" style="width:100%; height:auto;" />'
+        '<body><h1>CSI Camera MJPEG Stream</h1>'
+        '<img src="/stream" width="100%" height="auto" />'
         '</body></html>'
     )
 
