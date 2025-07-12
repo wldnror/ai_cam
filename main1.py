@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import warnings
-warnings.filterwarnings("ignore")  # 모든 파이썬 경고 억제
+warnings.filterwarnings("ignore")  # Python 경고 억제
 
 import logging
 logging.getLogger('ultralytics').setLevel(logging.WARNING)
@@ -41,7 +41,6 @@ class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        # RGB888 포맷으로 설정 (raw RGB)
         config = self.picam2.create_video_configuration(
             main = {"size": (1280, 720), "format": "RGB888"},
             lores = {"size": (640, 360)},
@@ -49,7 +48,7 @@ class CSICamera:
         )
         self.picam2.configure(config)
         self.picam2.start()
-        # 워밍업 프레임 (RGB)
+        # 워밍업 프레임
         for _ in range(3):
             self.picam2.capture_array("main")
 
@@ -78,7 +77,6 @@ def capture_and_process():
     last = time.time()
 
     while True:
-        # 프레임 타이밍
         now = time.time()
         sleep = interval - (now - last)
         if sleep > 0:
@@ -89,7 +87,7 @@ def capture_and_process():
         if not ret:
             continue
 
-        # RGB->BGR 변환 (OpenCV 기준)
+        # RGB->BGR 변환
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         frame_count += 1
@@ -129,23 +127,32 @@ def capture_and_process():
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# 4) Flask 앱 & 스트리밍 + 통계 엔드포인트
+# 4) Flask 앱 초기화
 app = Flask(__name__)
 
-# 기본 스트림 (OpenCV 처리 포함)
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# 기본 스트림 (OpenCV 처리)
 def generate():
     while True:
         frame = frame_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-# 테스트용 스트림 (OpenCV 비활성화, raw RGB->JPEG via Pillow)
+@app.route('/video_feed')
+def video_feed():
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
+    return resp
+
+# 테스트용 스트림 (Pillow만 사용)
 def generate_test():
     while True:
-        ret, frame = camera.read()  # RGB 배열
+        ret, frame = camera.read()  # RGB ndarray
         if not ret:
             continue
-        # Pillow 사용하여 RGB->JPEG
         img = Image.fromarray(frame)
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
@@ -153,26 +160,10 @@ def generate_test():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
 
-@app.route('/')
-require = '영상 스트림 확인: /video_feed (OpenCV), /test_feed (Raw)'
-@app.route('/video_feed')
-def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control':'no-cache, no-store, must-revalidate',
-        'Pragma':'no-cache', 'Expires':'0'
-    })
-    return resp
-
 @app.route('/test_feed')
 def test_feed():
-    resp = Response(generate_test(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control':'no-cache, no-store, must-revalidate',
-        'Pragma':'no-cache', 'Expires':'0'
-    })
+    resp = Response(generate_test(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
@@ -191,12 +182,7 @@ def stats():
             if part.startswith('level='):
                 signal = int(part.split('=')[1])
     except: pass
-    return jsonify({
-        'cpu_percent': cpu,
-        'memory_percent': mem,
-        'temperature_c': temp,
-        'wifi_signal_dbm': signal
-    })
+    return jsonify({'cpu_percent':cpu,'memory_percent':mem,'temperature_c':temp,'wifi_signal_dbm':signal})
 
 if __name__=='__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000
