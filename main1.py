@@ -14,6 +14,7 @@ logging.getLogger('torch').setLevel(logging.WARNING)
 werkzeug_log = logging.getLogger('werkzeug')  # Flask 요청 로그 억제
 werkzeug_log.setLevel(logging.ERROR)
 
+import os
 import time
 import threading
 import queue
@@ -24,6 +25,16 @@ import cv2
 import torch
 import psutil
 from flask import Flask, Response, render_template, jsonify, request
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 0) 화면 절전/DPMS 비활성화 (X가 있을 때만)
+try:
+    if os.environ.get('DISPLAY'):
+        os.system('setterm -blank 0 -powerdown 0 -powersave off')
+        os.system('xset s off; xset s noblank; xset -dpms')
+        print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
+except Exception:
+    pass
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) PyTorch 스레드 & 추론 모드 최적화
