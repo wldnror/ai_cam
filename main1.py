@@ -5,7 +5,6 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 import os
 import sys
 import queue
-import threading
 from picamera2 import Picamera2
 from picamera2.encoders import MJPEGEncoder
 from flask import Flask, Response
@@ -30,8 +29,8 @@ try:
     picam2.configure(config)
     frame_queue = queue.Queue(maxsize=1)
 
-    # 파일객체처럼 동작하는 콜백 클래스
     class FrameWriter:
+        """파일객체 인터페이스로 MJPEG 프레임을 버퍼에 푸시"""
         def write(self, buf):
             if not frame_queue.empty():
                 try:
@@ -40,7 +39,8 @@ try:
                     pass
             frame_queue.put(buf)
 
-    encoder = MJPEGEncoder(quality=80)
+    # quality는 지원하지 않으므로 기본 설정 사용
+    encoder = MJPEGEncoder()
     picam2.start_recording(encoder, FrameWriter())
     picam2.start()
     print(">>> Using CSI camera MJPEG stream")
