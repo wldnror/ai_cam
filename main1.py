@@ -18,21 +18,20 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Picamera2 사용, RGB 포맷으로 설정)
+# 1) CSI 카메라 초기화 (Picamera2 사용, BGR 포맷으로 설정)
 try:
     picam2 = Picamera2()
-    # RGB888 포맷으로 받아와 PIL에 바로 사용
+    # BGR888: 픽셀 배열이 [R, G, B] 순서로 반환됨 (PIL에 바로 사용 가능)
     config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "RGB888"},
+        main={"size": (1280, 720), "format": "BGR888"},
         lores={"size": (640, 360)},
         buffer_count=2
     )
     picam2.configure(config)
     picam2.start()
     # 워밍업 프레임
-    for _ in range(3):
-        picam2.capture_array("main")
-    print(">>> Using CSI camera module (RGB888)")
+    for _ in range(3): picam2.capture_array("main")
+    print(">>> Using CSI camera module (BGR888)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -40,21 +39,17 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 순수 CSI 카메라 화면 스트리밍 (RGB888 직접 JPEG 인코딩)
+# 순수 CSI 카메라 화면 스트리밍
 def generate():
     while True:
-        # RGB888 순서로 ndarray 반환
+        # BGR888 순으로 반환된 배열
         frame = picam2.capture_array("main")
-        # 만약 여전히 색상이 이상하면 아래 주석 해제하여 채널 스왑
-        # frame = frame[..., ::-1]  # RGB↔BGR 변환
-
-        # PIL로 JPEG 인코딩
-        img = Image.fromarray(frame)
+        # PIL에서 RGB 모드로 해석할 때 [R,G,B]로 처리됨
+        img = Image.fromarray(frame, 'RGB')
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
-        data = buf.getvalue()
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + buf.getvalue() + b'\r\n')
 
 @app.route('/')
 def index():
