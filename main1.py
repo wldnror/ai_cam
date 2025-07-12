@@ -5,8 +5,8 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 import os
 import sys
 import cv2
-from flask import Flask, Response
 from picamera2 import Picamera2
+from flask import Flask, Response
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
 try:
@@ -17,7 +17,7 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (RGB888 포맷) 및 자동 화이트밸런스 설정
+# 1) CSI 카메라 초기화: Video pipeline (정확한 ISP 처리)
 try:
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
@@ -27,13 +27,14 @@ try:
     )
     picam2.configure(config)
     picam2.set_controls({
-        "AwbEnable": True,    # 자동 화이트 밸런스
-        "AeEnable": True      # 자동 노출
+        "AwbEnable": True,
+        "AeEnable": True
     })
     picam2.start()
-    # 워밍업 프레임
-    for _ in range(3): picam2.capture_array("main")
-    print(">>> Using CSI camera module (RGB888, AWB/Ae enabled)")
+    # 워밍업 프레임 (ISP 안정화)
+    for _ in range(5):
+        picam2.capture_array("main")
+    print(">>> Using CSI camera video pipeline (RGB888, ISP enabled)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -41,17 +42,17 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 3) 스트리밍 엔드포인트
+# 3) MJPEG 스트림 엔드포인트
 @app.route('/stream')
 def stream():
+    boundary = b'--frame\r\n'
+    header = b'Content-Type: image/jpeg\r\n\r\n'
     def generate():
-        boundary = b'--frame\r\n'
-        header = b'Content-Type: image/jpeg\r\n\r\n'
         while True:
             # RGB888 ndarray 반환
             frame = picam2.capture_array("main")
-            # OpenCV는 BGR 순서이므로 변환
-            bgr = frame[..., ::-1]
+            # OpenCV에 BGR 형식으로 전달
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             ret, jpg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
                 continue
@@ -59,13 +60,13 @@ def stream():
             yield boundary + header + data + b'\r\n'
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# 4) 간단 HTML 페이지
+# 4) 간단 HTML 페이지 제공
 @app.route('/')
 def index():
     return (
         '<html><head><title>CSI Camera Stream</title></head>'
         '<body><h1>CSI Camera MJPEG Stream</h1>'
-        '<img src="/stream" width="100%" height="auto" />'
+        '<img src="/stream" style="width:100%; height:auto; background:black;" />'
         '</body></html>'
     )
 
