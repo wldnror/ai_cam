@@ -5,9 +5,10 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 import os
 import sys
 import io
+import queue
 from picamera2 import Picamera2
+from picamera2.encoders import JpegEncoder
 from flask import Flask, Response
-from PIL import Image
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
 try:
@@ -18,19 +19,33 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Picamera2 사용, Preview configuration으로 출력)
+# 1) CSI 카메라 초기화 및 MJPEG 스트림 생성 (JpegEncoder 사용)
 try:
     picam2 = Picamera2()
-    # preview 모드: 기본 BGR888 형식, 실시간 디스플레이/스트리밍용
-    config = picam2.create_preview_configuration(
-        main={"size": (1280, 720)},
+    # RGB888 형식으로 받아 PIL 인코딩에 적합
+    config = picam2.create_video_configuration(
+        main={"size": (1280, 720), "format": "RGB888"},
+        lores={"size": (640, 360)}
     )
     picam2.configure(config)
     picam2.start()
     # 워밍업 프레임
-    for _ in range(3):
-        picam2.capture_array("main")
-    print(">>> Using CSI camera preview configuration")
+    for _ in range(3): picam2.capture_array("main")
+    print(">>> Using CSI camera module with JpegEncoder")
+
+    frame_queue = queue.Queue(maxsize=1)
+    class FrameWriter:
+        """파일객체 인터페이스: JpegEncoder가 쓴 MJPEG 프레임을 버퍼에 저장"""
+        def write(self, buf):
+            # buf는 완성된 JPEG 프레임(바이트)
+            if not frame_queue.empty():
+                try: frame_queue.get_nowait()
+                except queue.Empty: pass
+            frame_queue.put(buf)
+
+    # JPEG 인코더(q=80)로 MJPEG 스트림 생성
+    encoder = JpegEncoder(q=80)
+    picam2.start_recording(encoder, FrameWriter())
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -38,23 +53,17 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 3) 순수 CSI 카메라 화면 스트리밍 (BGR888 그대로 JPEG으로 인코딩)
 def generate():
+    # multipart MJPEG 응답 바운더리
+    boundary = b'--frame\r\n'
+    header = b'Content-Type: image/jpeg\r\n\r\n'
     while True:
-        # create_preview_configuration은 BGR888로 반환
-        frame = picam2.capture_array("main")
-        # frame은 BGR이므로, PIL로 인식하려면 RGB로 변환
-        frame = frame[..., ::-1]
-        img = Image.fromarray(frame, 'RGB')
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG')
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buf.getvalue() + b'\r\n')
+        buf = frame_queue.get()  # MJPEG 프레임 데이터
+        yield boundary + header + buf + b'\r\n'
 
 @app.route('/')
 def index():
-    return Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
