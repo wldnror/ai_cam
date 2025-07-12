@@ -18,20 +18,19 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Picamera2 사용, BGR 포맷)
+# 1) CSI 카메라 초기화 (Picamera2 사용, Preview configuration으로 출력)
 try:
     picam2 = Picamera2()
-    config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "BGR888"},
-        lores={"size": (640, 360)},
-        buffer_count=2
+    # preview 모드: 기본 BGR888 형식, 실시간 디스플레이/스트리밍용
+    config = picam2.create_preview_configuration(
+        main={"size": (1280, 720)},
     )
     picam2.configure(config)
     picam2.start()
     # 워밍업 프레임
     for _ in range(3):
         picam2.capture_array("main")
-    print(">>> Using CSI camera module (BGR888)")
+    print(">>> Using CSI camera preview configuration")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -39,14 +38,13 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 3) 순수 CSI 카메라 화면 스트리밍 (BGR→RGB 스왑 포함)
+# 3) 순수 CSI 카메라 화면 스트리밍 (BGR888 그대로 JPEG으로 인코딩)
 def generate():
     while True:
-        # BGR 순서로 ndarray 반환
+        # create_preview_configuration은 BGR888로 반환
         frame = picam2.capture_array("main")
-        # BGR→RGB 채널 스왑
+        # frame은 BGR이므로, PIL로 인식하려면 RGB로 변환
         frame = frame[..., ::-1]
-        # PIL에서 RGB 모드로 인코딩
         img = Image.fromarray(frame, 'RGB')
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
