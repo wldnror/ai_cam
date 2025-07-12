@@ -4,8 +4,9 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 
 import os
 import sys
-import queue
+import subprocess
 from picamera2 import Picamera2
+import cv2
 from flask import Flask, Response
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
@@ -17,64 +18,55 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (녹화용 MJPEG 구성)
+# 1) CSI 카메라 초기화 (RGB888 포맷)
 try:
     picam2 = Picamera2()
-    # MJPEG 스트림 녹화를 위한 레코딩 구성
-    config = picam2.create_recording_configuration(
-        main={"size": (1280, 720)},
+    config = picam2.create_video_configuration(
+        main={"size": (1280, 720), "format": "RGB888"},
         lores={"size": (640, 360)},
-        encode="MJPEG"
+        buffer_count=2
     )
     picam2.configure(config)
-    print(">>> Using CSI camera recording configuration (MJPEG)")
+    picam2.start()
+    # 워밍업 프레임
+    for _ in range(3):
+        picam2.capture_array("main")
+    print(">>> Using CSI camera module (RGB888)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
 
-# 2) 프레임 저장용 큐
-frame_queue = queue.Queue(maxsize=1)
-
-# 3) FrameWriter 클래스 정의
-class FrameWriter:
-    """Picamera2가 생성한 MJPEG 프레임을 큐에 저장"""
-    def write(self, buf):
-        try:
-            data = buf.tobytes() if hasattr(buf, 'tobytes') else bytes(buf)
-            if not frame_queue.empty():
-                frame_queue.get_nowait()
-            frame_queue.put(data)
-        except Exception:
-            pass
-
-# 4) 녹화 시작
-picam2.start_recording(encoder=None, output=FrameWriter())
-
-# 5) Flask 앱 설정
+# 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 6) MJPEG 스트림 생성기
-def generate():
-    boundary = b'--frame\r\n'
-    header = b'Content-Type: image/jpeg\r\n\r\n'
-    while True:
-        buf = frame_queue.get()
-        yield boundary + header + buf + b'\r\n'
+# 3) 스트리밍 엔드포인트
+@app.route('/stream')
+def stream():
+    def generate():
+        while True:
+            # RAW RGB 프레임 가져오기
+            frame = picam2.capture_array("main")
+            # OpenCV는 BGR 입력, 배열 뒤집기
+            bgr = frame[..., ::-1]
+            # JPEG 인코딩
+            ret, jpg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if not ret:
+                continue
+            data = jpg.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# 7) HTML 페이지 제공
+# 4) 간단한 HTML 페이지
 @app.route('/')
 def index():
     return (
         '<html><head><title>CSI Camera Stream</title></head>'
-        '<body><h1>CSI Camera MJPEG Stream</h1>'
-        '<img src="/stream" style="width:100%;" />'
+        '<body>'
+        '<h1>CSI Camera MJPEG Stream</h1>'
+        '<img src="/stream" style="width:100%; height:auto;" />'
         '</body></html>'
     )
-
-# 8) MJPEG 스트림 엔드포인트
-@app.route('/stream')
-def stream():
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
