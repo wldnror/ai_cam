@@ -4,10 +4,10 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 
 import os
 import sys
-import queue
+import io
 from picamera2 import Picamera2
-from picamera2.encoders import MJPEGEncoder
 from flask import Flask, Response
+from PIL import Image
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
 try:
@@ -18,31 +18,21 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 및 MJPEG 인코더 설정
+# 1) CSI 카메라 초기화 (Picamera2 사용, RGB 포맷으로 설정)
 try:
     picam2 = Picamera2()
+    # RGB888 포맷으로 받아와 PIL에 바로 사용
     config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "YUV420"},
+        main={"size": (1280, 720), "format": "RGB888"},
         lores={"size": (640, 360)},
         buffer_count=2
     )
     picam2.configure(config)
-    frame_queue = queue.Queue(maxsize=1)
-
-    class FrameWriter:
-        """파일객체 인터페이스로 MJPEG 프레임을 버퍼에 푸시"""
-        def write(self, buf):
-            if not frame_queue.empty():
-                try:
-                    frame_queue.get_nowait()
-                except queue.Empty:
-                    pass
-            frame_queue.put(buf)
-
-    encoder = MJPEGEncoder()
-    # MJPEG 스트림 녹화 시작: encoder와 FrameWriter를 positional 인수로 전달
-    picam2.start_recording(encoder, FrameWriter())
-    print(">>> Using CSI camera MJPEG stream")
+    picam2.start()
+    # 워밍업 프레임
+    for _ in range(3):
+        picam2.capture_array("main")
+    print(">>> Using CSI camera module (RGB888)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -50,13 +40,21 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# MJPEG 스트림 생성기
+# 순수 CSI 카메라 화면 스트리밍 (RGB888 직접 JPEG 인코딩)
 def generate():
-    boundary = b'--frame\r\n'
-    header = b'Content-Type: image/jpeg\r\n\r\n'
     while True:
-        buf = frame_queue.get()
-        yield boundary + header + buf + b'\r\n'
+        # RGB888 순서로 ndarray 반환
+        frame = picam2.capture_array("main")
+        # 만약 여전히 색상이 이상하면 아래 주석 해제하여 채널 스왑
+        # frame = frame[..., ::-1]  # RGB↔BGR 변환
+
+        # PIL로 JPEG 인코딩
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        data = buf.getvalue()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
 
 @app.route('/')
 def index():
