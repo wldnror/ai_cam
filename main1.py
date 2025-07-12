@@ -17,7 +17,7 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Picamera2 사용, MJPEG 포맷)
+# 1) CSI 카메라 초기화 (MJPEG 포맷 사용)
 try:
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
@@ -35,29 +35,47 @@ except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
 
-# 2) Flask 앱 설정
+# 프레임 메시 저장용 큐
+frame_queue = queue.Queue(maxsize=1)
+
+# 버퍼 읽기 쓰기 핸들러
+class FrameWriter:
+    def write(self, buf):
+        # buf may be memoryview or bytes
+        try:
+            data = buf.tobytes() if hasattr(buf, 'tobytes') else bytes(buf)
+            if not frame_queue.empty(): frame_queue.get_nowait()
+            frame_queue.put(data)
+        except Exception:
+            pass
+
+# 녹화 시작 (MJPEGStream)
+picam2.start_recording(picam2.streams.main, FrameWriter())
+
+# Flask 앱 설정
 app = Flask(__name__)
 
-# 3) 순수 CSI 카메라 MJPEG 스트리밍
-
+# 스트림 생성기
+boundary = b'--frame\r\n'
+header = b'Content-Type: image/jpeg\r\n\r\n'
 def generate():
-    boundary = b'--frame\r\n'
-    header = b'Content-Type: image/jpeg\r\n\r\n'
     while True:
-        buf = picam2.capture_buffer("main")  # JPEG 프레임(바이트 또는 버퍼)
-        # 타입이 메모리뷰나 numpy일 경우 bytes로 변환
-        if not isinstance(buf, (bytes, bytearray)):
-            try:
-                buf = buf.tobytes()
-            except AttributeError:
-                buf = bytes(buf)
+        buf = frame_queue.get()
         yield boundary + header + buf + b'\r\n'
 
+# HTML 페이지 제공
 @app.route('/')
 def index():
+    return ('<html><head><title>CSI Camera Stream</title></head>'
+            '<body><h1>CSI Camera MJPEG Stream</h1>'
+            '<img src="/stream" style="width:100%;" />'
+            '</body></html>')
+
+# MJPEG 스트림 엔드포인트
+@app.route('/stream')
+def stream():
     return Response(generate(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
