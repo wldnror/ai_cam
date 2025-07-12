@@ -185,4 +185,4 @@ def stats():
     return jsonify({'cpu_percent':cpu,'memory_percent':mem,'temperature_c':temp,'wifi_signal_dbm':signal})
 
 if __name__=='__main__':
-    app.run(host='0.0.0.0', port=5000
+    app.run(host='0.0.0.0', port=5000)
