@@ -39,10 +39,9 @@ try:
                     pass
             frame_queue.put(buf)
 
-    # MJPEG 인코더 생성 및 녹화 시작
     encoder = MJPEGEncoder()
-    picam2.start()
-    picam2.start_recording(encoder=encoder, output=FrameWriter())
+    # MJPEG 스트림 녹화 시작: encoder와 FrameWriter를 positional 인수로 전달
+    picam2.start_recording(encoder, FrameWriter())
     print(">>> Using CSI camera MJPEG stream")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
