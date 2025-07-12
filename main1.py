@@ -17,24 +17,17 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화: Video pipeline (정확한 ISP 처리)
+# 1) CSI 카메라 초기화: Preview Configuration (BGR888 포맷)
 try:
     picam2 = Picamera2()
-    config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "RGB888"},
-        lores=None,
-        buffer_count=2
+    config = picam2.create_preview_configuration(
+        main={"size": (1280, 720), "format": "BGR888"}
     )
     picam2.configure(config)
-    picam2.set_controls({
-        "AwbEnable": True,
-        "AeEnable": True
-    })
     picam2.start()
-    # 워밍업 프레임 (ISP 안정화)
-    for _ in range(5):
-        picam2.capture_array("main")
-    print(">>> Using CSI camera video pipeline (RGB888, ISP enabled)")
+    # 워밍업 프레임
+    for _ in range(5): picam2.capture_array("main")
+    print(">>> Using CSI camera preview configuration (BGR888)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
