@@ -13,6 +13,8 @@ import threading
 import queue
 import subprocess
 import sys
+import io
+from PIL import Image
 
 import cv2
 import torch
@@ -39,7 +41,7 @@ class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        # RGB888 포맷으로 명시
+        # RGB888 포맷으로 설정 (raw RGB)
         config = self.picam2.create_video_configuration(
             main = {"size": (1280, 720), "format": "RGB888"},
             lores = {"size": (640, 360)},
@@ -52,7 +54,7 @@ class CSICamera:
             self.picam2.capture_array("main")
 
     def read(self):
-        # RGB 배열
+        # True, RGB ndarray
         return True, self.picam2.capture_array("main")
 
 # CSI 카메라만 사용 (실패 시 종료)
@@ -76,6 +78,7 @@ def capture_and_process():
     last = time.time()
 
     while True:
+        # 프레임 타이밍
         now = time.time()
         sleep = interval - (now - last)
         if sleep > 0:
@@ -86,7 +89,7 @@ def capture_and_process():
         if not ret:
             continue
 
-        # RGB->BGR 변환 (OpenCV가 BGR 기준)
+        # RGB->BGR 변환 (OpenCV 기준)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         frame_count += 1
@@ -98,7 +101,7 @@ def capture_and_process():
         if last_results is None:
             continue
 
-        # 추론 결과 박스 그리기
+        # 박스 그리기
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
@@ -118,7 +121,7 @@ def capture_and_process():
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
 
-        # 큐에 최신 프레임만
+        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
             try: frame_queue.get_nowait()
             except queue.Empty: pass
@@ -129,23 +132,47 @@ threading.Thread(target=capture_and_process, daemon=True).start()
 # 4) Flask 앱 & 스트리밍 + 통계 엔드포인트
 app = Flask(__name__)
 
+# 기본 스트림 (OpenCV 처리 포함)
 def generate():
     while True:
         frame = frame_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-@app.route('/')
-def index(): return render_template('index.html')
+# 테스트용 스트림 (OpenCV 비활성화, raw RGB->JPEG via Pillow)
+def generate_test():
+    while True:
+        ret, frame = camera.read()  # RGB 배열
+        if not ret:
+            continue
+        # Pillow 사용하여 RGB->JPEG
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        data = buf.getvalue()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + data + b'\r\n')
 
+@app.route('/')
+require = '영상 스트림 확인: /video_feed (OpenCV), /test_feed (Raw)'
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame',
-                    direct_passthrough=True)
-    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-    resp.headers['Pragma'] = 'no-cache'
-    resp.headers['Expires'] = '0'
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({
+        'Cache-Control':'no-cache, no-store, must-revalidate',
+        'Pragma':'no-cache', 'Expires':'0'
+    })
+    return resp
+
+@app.route('/test_feed')
+def test_feed():
+    resp = Response(generate_test(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({
+        'Cache-Control':'no-cache, no-store, must-revalidate',
+        'Pragma':'no-cache', 'Expires':'0'
+    })
     return resp
 
 @app.route('/stats')
@@ -163,8 +190,7 @@ def stats():
         for part in out.split():
             if part.startswith('level='):
                 signal = int(part.split('=')[1])
-    except:
-        pass
+    except: pass
     return jsonify({
         'cpu_percent': cpu,
         'memory_percent': mem,
