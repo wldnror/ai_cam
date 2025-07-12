@@ -39,11 +39,14 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 순수 CSI 카메라 화면 스트리밍 (BGR → RGB 변환 없이 그대로 사용)
+# 순수 CSI 카메라 화면 스트리밍 (BGR → RGB 변환 적용)
 def generate():
     while True:
-        # BGR 순으로 반환되므로, 바로 JPEG 인코딩
+        # BGR 순으로 반환되므로, RGB로 변환
         frame = picam2.capture_array("main")
+        frame = frame[..., ::-1]  # BGR → RGB
+
+        # PIL로 JPEG 인코딩
         img = Image.fromarray(frame)
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
