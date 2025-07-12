@@ -17,10 +17,9 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Picamera2 사용, MJPEG 포맷으로 설정)
+# 1) CSI 카메라 초기화 (Picamera2 사용, MJPEG 포맷)
 try:
     picam2 = Picamera2()
-    # MJPEG 형식으로 직접 JPEG 스트림을 받을 수 있음
     config = picam2.create_video_configuration(
         main={"size": (1280, 720), "format": "MJPEG"},
         lores={"size": (640, 360)},
@@ -45,13 +44,20 @@ def generate():
     boundary = b'--frame\r\n'
     header = b'Content-Type: image/jpeg\r\n\r\n'
     while True:
-        # capture_buffer 로 바로 JPEG 프레임 바이트를 가져옴
-        buf = picam2.capture_buffer("main")
+        buf = picam2.capture_buffer("main")  # JPEG 프레임(바이트 또는 버퍼)
+        # 타입이 메모리뷰나 numpy일 경우 bytes로 변환
+        if not isinstance(buf, (bytes, bytearray)):
+            try:
+                buf = buf.tobytes()
+            except AttributeError:
+                buf = bytes(buf)
         yield boundary + header + buf + b'\r\n'
 
 @app.route('/')
 def index():
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
