@@ -3,17 +3,16 @@ import warnings
 warnings.filterwarnings("ignore")  # 모든 파이썬 경고 억제
 
 import logging
-logging.getLogger('ultralytics').setLevel(logging.WARNING)
+logging.getLogger('ultralytics').setLevel(logging.WARNING)  # yolov5 허브 로깅 억제
 logging.getLogger('torch').setLevel(logging.WARNING)
-werkzeug_log = logging.getLogger('werkzeug')
-werkzeug_log.setLevel(logging.ERROR)
+logging.getLogger('werkzeug').setLevel(logging.ERROR)  # Flask 요청 로그 억제
 
 import os
-import sys
 import time
 import threading
 import queue
 import subprocess
+import sys
 
 import cv2
 import torch
@@ -21,69 +20,63 @@ import psutil
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화
+# 0) 화면 절전/DPMS 비활성화 (X가 있을 때만)
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
         os.system('xset s off; xset s noblank; xset -dpms')
         print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
-except:
+except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) 모델 로드 (force_reload 로 weights_only 이슈 우회)
-#    캐시를 지운 뒤 실행하세요: rm -rf ~/.cache/torch/hub/ultralytics_yolov5_master
-model = torch.hub.load(
-    'ultralytics/yolov5',
-    'yolov5n',
-    pretrained=True,
-    force_reload=True
-)
+# 1) PyTorch 스레드 & 추론 모드 최적화
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
 model.eval()
-print("YOLOv5 모델 로드 완료")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) CSI 카메라 정의 (Picamera2 + libcamera)
+# 2) CSI 카메라 모듈 정의 (Picamera2 사용)
 class CSICamera:
+    """Raspberry Pi CSI 카메라 모듈을 Picamera2로 제어"""
     def __init__(self):
-        try:
-            from picamera2 import Picamera2
-        except ModuleNotFoundError:
-            sys.exit(
-                "ERROR: picamera2/libcamera 모듈을 찾을 수 없습니다.\n"
-                "sudo apt install -y python3-picamera2 libcamera-apps\n"
-                "혹은 venv 생성 시 --system-site-packages 옵션을 사용하세요."
-            )
+        from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        config = self.picam2.create_preview_configuration(
-            main         = {"format": "XRGB8888", "size": (1280, 720)},
-            lores        = {"format": "XRGB8888", "size": (640, 360)},
+        config = self.picam2.create_video_configuration(
+            main         = {"size": (1280, 720)},
+            lores        = {"size": (640, 360)},
             buffer_count = 2
         )
         self.picam2.configure(config)
         self.picam2.start()
+        # 워밍업 프레임
         for _ in range(3):
             self.picam2.capture_array("main")
 
     def read(self):
         return True, self.picam2.capture_array("main")
 
-# CSI 카메라만 사용
-camera = CSICamera()
-print(">>> CSI 카메라 사용 중")
+# CSI 카메라만 사용 (실패 시 종료)
+try:
+    camera = CSICamera()
+    print(">>> Using CSI camera module")
+except Exception as e:
+    print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
+    sys.exit(1)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3) 백그라운드 프레임 처리 스레드 + 큐
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
-    fps = 10
+    fps = 10                          # OPT ▶︎ FPS 조정
     interval = 1.0 / fps
-    target_size = (320, 320)
-    skip_interval = 2
+    target_size = (320, 320)          # OPT ▶︎ 해상도 조정
+    skip_interval = 2                 # OPT ▶︎ 프레임 스킵
     frame_count = 0
-    last_results = None
     last = time.time()
+    last_results = None
 
     while True:
         now = time.time()
@@ -105,6 +98,7 @@ def capture_and_process():
         if last_results is None:
             continue
 
+        # 추론 결과 박스 그리기
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
@@ -121,18 +115,22 @@ def capture_and_process():
                 cv2.putText(frame, label, (x1, y1-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
 
+        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
-            try: frame_queue.get_nowait()
-            except queue.Empty: pass
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
         frame_queue.put(data)
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 & 엔드포인트
+# 4) Flask 앱 & 스트리밍 + 통계 엔드포인트
 app = Flask(__name__)
 
 def generate():
@@ -140,6 +138,16 @@ def generate():
         frame = frame_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+
+def get_network_signal(interface='wlan0'):
+    try:
+        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
+        for part in out.split():
+            if part.startswith('level='):
+                return int(part.split('=')[1])
+    except Exception:
+        return None
 
 @app.route('/')
 def index():
@@ -157,23 +165,18 @@ def video_feed():
 
 @app.route('/stats')
 def stats():
+    cam_no = request.args.get('cam', default=1, type=int)
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory()
     temp = None
     try:
         with open('/sys/class/thermal/thermal_zone0/temp') as f:
             temp = float(f.read()) / 1000.0
-    except:
+    except Exception:
         pass
-    signal = None
-    try:
-        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                signal = int(part.split('=')[1])
-    except:
-        pass
+    signal = get_network_signal('wlan0')
     return jsonify({
+        'camera': cam_no,
         'cpu_percent': cpu,
         'memory_percent': mem.percent,
         'temperature_c': temp,
