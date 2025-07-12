@@ -4,30 +4,34 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 
 import os
 import sys
-import cv2
+import io
 from picamera2 import Picamera2
 from flask import Flask, Response
+from PIL import Image
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
         os.system('xset s off; xset s noblank; xset -dpms')
-        print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
+        print("⏱️ 화면 절전/스크린세이버 비활러화 완료")
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화: Preview Configuration (BGR888 포맷)
+# 1) CSI 카메라 초기화: RGB888 포맷으로 설정하여 채널 순서 문제 제거
 try:
     picam2 = Picamera2()
-    config = picam2.create_preview_configuration(
-        main={"size": (1280, 720), "format": "BGR888"}
+    config = picam2.create_video_configuration(
+        main={"size": (1280, 720), "format": "RGB888"},
+        lores={"size": (640, 360)},
+        buffer_count=2
     )
     picam2.configure(config)
     picam2.start()
     # 워밍업 프레임
-    for _ in range(5): picam2.capture_array("main")
-    print(">>> Using CSI camera preview configuration (BGR888)")
+    for _ in range(5):
+        picam2.capture_array("main")
+    print(">>> Using CSI camera module (RGB888 format)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -42,14 +46,13 @@ def stream():
     header = b'Content-Type: image/jpeg\r\n\r\n'
     def generate():
         while True:
-            # RGB888 ndarray 반환
+            # RGB ndarray 반환
             frame = picam2.capture_array("main")
-            # OpenCV에 BGR 형식으로 전달
-            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            ret, jpg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            if not ret:
-                continue
-            data = jpg.tobytes()
+            # PIL Image로 변환 (RGB 순서 유지)
+            img = Image.fromarray(frame, 'RGB')
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            data = buf.getvalue()
             yield boundary + header + data + b'\r\n'
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
