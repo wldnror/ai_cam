@@ -43,9 +43,9 @@ class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
-        # BGR888 포맷으로 설정
+        # 기본 RGB 포맷 (format 지정 없이)
         config = self.picam2.create_video_configuration(
-            main         = {"size": (1280, 720), "format": "BGR888"},
+            main         = {"size": (1280, 720)},
             lores        = {"size": (640, 360)},
             buffer_count = 2
         )
@@ -56,7 +56,7 @@ class CSICamera:
             self.picam2.capture_array("main")
 
     def read(self):
-        # 이미 BGR 포맷으로 반환됨
+        # RGB 순서로 반환됨
         return True, self.picam2.capture_array("main")
 
 # CSI 카메라만 사용 (실패 시 종료)
@@ -91,8 +91,8 @@ def capture_and_process():
         if not ret:
             continue
 
-        # (RGB->BGR 변환 불필요, 이미 BGR888)
-        # frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # RGB->BGR 변환 (OpenCV의 BGR 기준)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         frame_count += 1
         if frame_count % skip_interval == 0:
