@@ -38,8 +38,8 @@ except Exception:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) PyTorch 스레드 & 추론 모드 최적화
-torch.set_num_threads(4)
-torch.set_num_interop_threads(4)
+torch.set_num_threads(3)
+torch.set_num_interop_threads(3)
 model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
 model.eval()
 
@@ -74,7 +74,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)    # 드라이버 레벨 버퍼 4프레임
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)    # 드라이버 레벨 버퍼 4프레임
                 for _ in range(5):
                     cap.read()
                 self.cap = cap
