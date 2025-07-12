@@ -5,8 +5,6 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 import os
 import sys
 import io
-import numpy as np
-import subprocess
 from picamera2 import Picamera2
 from flask import Flask, Response
 from PIL import Image
@@ -20,11 +18,11 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (Picamera2 사용)
+# 1) CSI 카메라 초기화 (Picamera2 사용, BGR 포맷으로 설정)
 try:
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "RGB888"},
+        main={"size": (1280, 720), "format": "BGR888"},
         lores={"size": (640, 360)},
         buffer_count=2
     )
@@ -33,7 +31,7 @@ try:
     # 워밍업 프레임
     for _ in range(3):
         picam2.capture_array("main")
-    print(">>> Using CSI camera module")
+    print(">>> Using CSI camera module (BGR888)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -41,14 +39,11 @@ except Exception as e:
 # 2) Flask 앱 설정
 app = Flask(__name__)
 
-# 순수 CSI 카메라 화면 스트리밍 (채널 순서 보정 포함)
+# 순수 CSI 카메라 화면 스트리밍 (BGR → RGB 변환 없이 그대로 사용)
 def generate():
     while True:
-        frame = picam2.capture_array("main")  # 기본 RGB888 출력
-        # 만약 색상이 뒤바뀌어 보이면, BGR로 반환된 경우일 수 있음
-        # frame = frame[..., ::-1]  # BGR→RGB 변환 (필요 시 주석 해제)
-
-        # PIL로 JPEG 인코딩
+        # BGR 순으로 반환되므로, 바로 JPEG 인코딩
+        frame = picam2.capture_array("main")
         img = Image.fromarray(frame)
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
