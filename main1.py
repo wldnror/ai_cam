@@ -50,8 +50,8 @@ class CSICamera:
         )
         self.picam2.configure(config)
         self.picam2.start()
-        for _ in range(3):
-            self.picam2.capture_array("main")
+	
+	self.picam2.capture_array("main")
 
     def read(self):
         return True, self.picam2.capture_array("main")
