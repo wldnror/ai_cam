@@ -4,7 +4,6 @@ warnings.filterwarnings("ignore")  # Python 경고 억제
 
 import os
 import sys
-import subprocess
 import cv2
 from picamera2 import Picamera2
 from flask import Flask, Response
@@ -21,13 +20,9 @@ except Exception:
 # 1) CSI 카메라 초기화 (Preview Configuration 사용)
 try:
     picam2 = Picamera2()
-    # Preview용 설정: 자동으로 BGR888 포맷을 반환해서 OpenCV에서 바로 사용 가능
     config = picam2.create_preview_configuration(
         main={"size": (1280, 720), "format": "BGR888"},
         lores={"size": (640, 360)}
-    )},
-        lores={"size": (640, 360)},
-        display=False
     )
     picam2.configure(config)
     picam2.start()
@@ -49,9 +44,9 @@ def stream():
         boundary = b'--frame\r\n'
         header = b'Content-Type: image/jpeg\r\n\r\n'
         while True:
-            # Preview config는 BGR 순서 ndarray 반환
+            # Preview configuration은 BGR888 ndarray를 반환
             frame = picam2.capture_array("main")
-            # 바로 JPEG 인코딩
+            # JPEG 인코딩
             ret, jpg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
                 continue
