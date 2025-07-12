@@ -6,6 +6,7 @@ import os
 import sys
 import queue
 from picamera2 import Picamera2
+from picamera2.encoders import JpegEncoder
 from flask import Flask, Response
 
 # 0) 화면 절전/DPMS 비활성화 (X 환경일 때만)
@@ -17,20 +18,19 @@ try:
 except Exception:
     pass
 
-# 1) CSI 카메라 초기화 (MJPEG 포맷)
+# 1) CSI 카메라 초기화 (YUV420 포맷으로 설정)
 try:
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "MJPEG"},
+        main={"size": (1280, 720), "format": "YUV420"},
         lores={"size": (640, 360)},
         buffer_count=2
     )
     picam2.configure(config)
     picam2.start()
     # 워밍업 캡처
-    for _ in range(3):
-        picam2.capture_buffer("main")
-    print(">>> Using CSI camera module (MJPEG)")
+    for _ in range(3): picam2.capture_array("main")
+    print(">>> Using CSI camera module (YUV420)")
 except Exception as e:
     print(f"[ERROR] CSI 카메라 초기화 실패: {e}")
     sys.exit(1)
@@ -40,7 +40,7 @@ frame_queue = queue.Queue(maxsize=1)
 
 # 3) FrameWriter 클래스 정의
 class FrameWriter:
-    """Picamera2 MJPEG 스트림을 캡처해 큐에 저장"""
+    """JpegEncoder가 생성한 JPEG 프레임을 큐에 저장"""
     def write(self, buf):
         try:
             data = buf.tobytes() if hasattr(buf, 'tobytes') else bytes(buf)
@@ -50,13 +50,14 @@ class FrameWriter:
         except Exception:
             pass
 
-# 4) MJPEG 녹화 시작
-picam2.start_recording(FrameWriter())
+# 4) JpegEncoder로 녹화 시작
+encoder = JpegEncoder(q=80)
+picam2.start_recording(encoder, FrameWriter())
 
 # 5) Flask 앱 설정
 app = Flask(__name__)
 
-# MJPEG 스트림 생산기
+# 6) MJPEG 스트림 생성기
 def generate():
     boundary = b'--frame\r\n'
     header = b'Content-Type: image/jpeg\r\n\r\n'
@@ -64,7 +65,7 @@ def generate():
         buf = frame_queue.get()
         yield boundary + header + buf + b'\r\n'
 
-# HTML 페이지 제공
+# 7) HTML 페이지 제공
 @app.route('/')
 def index():
     return (
@@ -74,7 +75,7 @@ def index():
         '</body></html>'
     )
 
-# MJPEG 스트림 엔드포인트
+# 8) MJPEG 스트림 엔드포인트
 @app.route('/stream')
 def stream():
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
