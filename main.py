@@ -19,10 +19,30 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import torch
 import psutil
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화
+# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+if not os.path.exists(FONT_PATH):
+    try:
+        print("한글 폰트가 없어 설치를 시도합니다...")
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+    except Exception as e:
+        print(f"폰트 설치 실패: {e}")
+
+# 설치 후 폰트 로드
+try:
+    font = ImageFont.truetype(FONT_PATH, 24)
+except Exception:
+    font = ImageFont.load_default()
+    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
@@ -32,7 +52,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) PyTorch 스레드 수 & YOLOv5 모델 로드
+# 2) PyTorch 스레드 수 & YOLOv5 모델 로드
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
 
@@ -63,7 +83,7 @@ label_map = {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 클래스 정의
+# 3) 카메라 클래스 정의
 class CSICamera:
     """CSI 카메라를 Picamera2로 제어"""
     def __init__(self):
@@ -115,7 +135,7 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 백그라운드 프레임 처리 스레드
+# 4) 백그라운드 프레임 처리 스레드
 frame_queue = queue.Queue(maxsize=3)
 executor = ThreadPoolExecutor(max_workers=4)
 last_boxes = []  # 전역으로 유지할 마지막 감지 결과
@@ -149,20 +169,28 @@ def capture_and_process():
 
         frame_count += 1
 
-        # 1) skip_interval 마다 비동기 추론 제출
         if frame_count % skip_interval == 0:
             executor.submit(infer_and_update, frame.copy(), target_size)
 
-        # 2) 저장된 박스 항상 그리기
-        for x1, y1, x2, y2, label, conf in last_boxes:
-            # 사람은 파랑(BGR), 자동차는 빨강
-            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
-            text = f"{label_map[label]} {conf*100:.1f}%"
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, text, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # PIL로 그리기 준비
+        img_pil = Image.fromarray(frame[:, :, ::-1])
+        draw = ImageDraw.Draw(img_pil)
 
-        # 3) JPEG 인코딩 → 큐에 삽입
+        for x1, y1, x2, y2, label, conf in last_boxes:
+            # BGR -> RGB
+            color_bgr = (255, 0, 0) if label == 'person' else (0, 0, 255)
+            color = tuple(reversed(color_bgr))
+            # 사각형
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+            # 텍스트
+            text = f"{label_map[label]} {conf*100:.1f}%"
+            text_size = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1 - text_size[1] - 4, x1 + text_size[0] + 4, y1], fill=(0, 0, 0))
+            draw.text((x1 + 2, y1 - text_size[1] - 2), text, font=font, fill=color)
+
+        # 다시 OpenCV BGR 포맷으로 변환
+        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         data = buf.tobytes()
         if not frame_queue.empty():
@@ -172,14 +200,13 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
-        # 4) FPS 유지
         elapsed = time.time() - start
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 및 엔드포인트
+# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
