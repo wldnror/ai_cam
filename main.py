@@ -125,7 +125,7 @@ def capture_and_process():
             results.render()  # frame 위에 박스와 라벨을 그림
 
         # 2) 결과 가져오기 (RGB → BGR)
-        annotated = results.imgs[0]
+        annotated = results.ims[0]
         frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
 
         # 3) JPEG 인코딩 & 큐에 저장
