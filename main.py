@@ -14,6 +14,7 @@ import time
 import threading
 import queue
 import subprocess
+import glob
 
 import cv2
 import torch
@@ -31,7 +32,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드
+# 1) YOLOv5 모델 로드 (DetectMultiBackend + AutoShape)
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
@@ -59,18 +60,21 @@ class USBCamera:
         self.open()
 
     def open(self):
-        for i in range(5):
-            cap = cv2.VideoCapture(i)
+        # /dev/video*에서 사용 가능한 디바이스 검색
+        device_paths = sorted(glob.glob('/dev/video*'))
+        for dev in device_paths:
+            cap = cv2.VideoCapture(dev)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5): cap.read()
+                for _ in range(5):
+                    cap.read()
                 self.cap = cap
-                break
-        if not self.cap:
-            raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
+                print(f"[INFO] Opened camera device: {dev}")
+                return
+        raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
 
     def restart(self):
         try:
@@ -87,7 +91,11 @@ class USBCamera:
         return self.cap.read()
 
 # 초기 카메라 생성
-camera = USBCamera()
+try:
+    camera = USBCamera()
+except Exception as e:
+    print(f"[ERROR] 초기 카메라 열기 실패: {e}")
+    sys.exit(1)
 print(">>> Using USB webcam only")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -95,7 +103,6 @@ print(">>> Using USB webcam only")
 raw_queue = queue.Queue(maxsize=2)
 frame_queue = queue.Queue(maxsize=2)
 
-# 프레임 수신 모니터링 변수
 _last_frame_time = time.time()
 
 def capture_loop():
@@ -114,7 +121,6 @@ def capture_loop():
             if not raw_queue.full():
                 raw_queue.put(frame)
         else:
-            # 일정 시간 이상 프레임 수신 없으면 재시작
             if now - _last_frame_time > 2.0:
                 print("[WARN] No frames received for 2s, attempting camera restart")
                 camera.restart()
@@ -145,7 +151,7 @@ def inference_loop():
                 inf_start = time.time()
                 with torch.no_grad():
                     results = model(frame, size=target_size)
-                inf_time = (time.time() - inf_start) * 1000  # ms
+                inf_time = (time.time() - inf_start) * 1000
                 infer_count += 1
 
                 if infer_count % 10 == 0:
@@ -164,7 +170,6 @@ def inference_loop():
             except Exception as e:
                 print(f"[ERROR] Inference exception: {e}")
 
-        # 인코딩 및 큐 삽입
         try:
             _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY),80])
             if not frame_queue.full():
@@ -176,12 +181,11 @@ def inference_loop():
         if elapsed < interval:
             time.sleep(interval - elapsed)
 
-# 쓰레드 시작
 threading.Thread(target=capture_loop, daemon=True).start()
 threading.Thread(target=inference_loop, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱
+# 4) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
