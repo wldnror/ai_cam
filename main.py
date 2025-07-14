@@ -51,9 +51,6 @@ backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
 
-# confidence threshold 설정 (기본 0.25 → 필요시 조정)
-model.conf = 0.25
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 카메라 클래스 정의
 class CSICamera:
@@ -70,6 +67,7 @@ class CSICamera:
             self.picam2.capture_array("main")
 
     def read(self):
+        # Picamera2 기본 출력은 RGB → OpenCV 기대 BGR로 변환
         rgb = self.picam2.capture_array("main")
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         return True, bgr
@@ -93,6 +91,7 @@ class USBCamera:
             raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
 
     def read(self):
+        # USB cam은 이미 BGR 순서로 반환
         return self.cap.read()
 
 # CSI 모듈 시도, 실패 시 USB
@@ -111,7 +110,9 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320  # AutoShape 인풋 크기
+    target_size = 320  # AutoShape 크기 지정
+    skip_interval = 2
+    frame_count = 0
 
     while True:
         start = time.time()
@@ -119,16 +120,20 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 1) 추론 & 렌더링
-        with torch.no_grad():
-            results = model(frame, size=target_size)
-            results.render()  # frame 위에 박스와 라벨을 그림
+        frame_count += 1
+        if frame_count % skip_interval == 0:
+            with torch.no_grad():
+                results = model(frame, size=target_size)
 
-        # 2) 결과 가져오기 (RGB → BGR)
-        annotated = results.ims[0]
-        frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
+            for *box, conf, cls in results.xyxy[0]:
+                x1, y1, x2, y2 = map(int, box)
+                label = results.names[int(cls)]
+                if label in ('person', 'car'):
+                    color = (0, 0, 255) if label == 'person' else (255, 0, 0)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # 3) JPEG 인코딩 & 큐에 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
@@ -138,7 +143,6 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
-        # 4) FPS 유지
         elapsed = time.time() - start
         sleep = interval - elapsed
         if sleep > 0:
