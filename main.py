@@ -33,7 +33,8 @@ except Exception:
 # 1) PyTorch 스레드 & 추론 모드 최적화
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
-model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
+# force_reload=True 옵션 추가하여 모델 캐시 강제 재다운로드
+model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True, force_reload=True)
 model.eval()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -67,8 +68,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5):
-                    cap.read()
+                for _ in range(5): cap.read()
                 self.cap = cap
                 break
         if self.cap is None:
