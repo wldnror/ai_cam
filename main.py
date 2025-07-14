@@ -41,7 +41,6 @@ sys.path.insert(0, YOLOROOT)
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
-# 디바이스 설정
 device = select_device('cpu')
 WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
@@ -55,7 +54,7 @@ backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
 
-# confidence threshold 조정 (0.0~1.0)
+# confidence threshold 설정
 model.conf = 0.25
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -70,7 +69,6 @@ class CSICamera:
         )
         self.picam2.configure(cfg)
         self.picam2.start()
-        # 워밍업 프레임 드랍
         for _ in range(3):
             self.picam2.capture_array("main")
 
@@ -100,7 +98,6 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# CSI 카메라 우선, 실패하면 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -116,7 +113,7 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320  # AutoShape 인풋 크기
+    target_size = 320
 
     while True:
         start = time.time()
@@ -124,16 +121,16 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 1) 모델 추론 & 렌더링
+        # 추론 및 렌더
         with torch.no_grad():
             results = model(frame, size=target_size)
-            results.render()  # frame 위에 박스 & 라벨 그리기
+            results.render()
 
-        # 2) 렌더된 이미지 가져와 BGR로 변환
-        annotated = results.imgs[0]
+        # 수정: .imgs → .ims
+        annotated = results.ims[0]
         frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
 
-        # 3) JPEG 인코딩 & 큐에 저장
+        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
@@ -143,14 +140,14 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
-        # 4) FPS 유지
+        # FPS 유지
         elapsed = time.time() - start
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 및 엔드포인트
+# 4) Flask 앱 & 엔드포인트
 app = Flask(__name__)
 
 def generate():
@@ -170,7 +167,7 @@ def get_network_signal(interface='wlan0'):
 
 @app.route('/')
 def index():
-    return render_template('index.html')  # index.html 안에 <img src="/video_feed"> 필요
+    return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
