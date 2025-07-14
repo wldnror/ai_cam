@@ -48,7 +48,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) PyTorch 스레드 수 & YOLOv5 모델 로드
+# 2) PyTorch 스레드 수 & YOLOv5 모델 로드 (동적 전환)
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
 
@@ -60,14 +60,61 @@ from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-WEIGHTS = os.path.join(YOLOROOT, 'yolov5m.pt')
-if not os.path.exists(WEIGHTS):
-    torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5m.pt', WEIGHTS
-    )
-backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
-backend.model.eval()
-model = AutoShape(backend.model)
+
+# 모델 전환 설정
+MODEL_CONFIGS = [
+    {"name": "yolov5m.pt", "threshold_max": 65},   # 65℃ 이하 -> yolov5m
+    {"name": "yolov5n.pt", "threshold_max": 100},  # 65℃ 초과 -> yolov5n
+]
+CURRENT_MODEL = None
+LAST_SWITCH = 0
+SWITCH_INTERVAL = 10  # 온도 체크 및 전환 주기 (초)
+
+
+def load_model(weights_name):
+    """주어진 가중치 파일로 모델 로드"""
+    global backend, model, CURRENT_MODEL
+    weights_path = os.path.join(YOLOROOT, weights_name)
+    if not os.path.exists(weights_path):
+        torch.hub.download_url_to_file(
+            f'https://github.com/ultralytics/yolov5/releases/download/v7.0/{weights_name}',
+            weights_path
+        )
+    backend = DetectMultiBackend(weights_path, device=device, fuse=True)
+    backend.model.eval()
+    model = AutoShape(backend.model)
+    CURRENT_MODEL = weights_name
+    print(f"[MODEL] Loaded {weights_name}")
+
+
+def get_cpu_temp():
+    """CPU 온도를 °C 단위로 반환"""
+    try:
+        return float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except:
+        return None
+
+
+def maybe_switch_model():
+    """SWITCH_INTERVAL 간격으로 온도를 체크해 모델을 전환"""
+    global LAST_SWITCH
+    now = time.time()
+    if now - LAST_SWITCH < SWITCH_INTERVAL:
+        return
+    LAST_SWITCH = now
+
+    temp = get_cpu_temp()
+    if temp is None:
+        return
+
+    for cfg in MODEL_CONFIGS:
+        if temp <= cfg['threshold_max']:
+            if cfg['name'] != CURRENT_MODEL:
+                load_model(cfg['name'])
+            break
+
+# 초기 모델 로드 (시작 시 65℃ 이하 가정)
+load_model(MODEL_CONFIGS[0]['name'])
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 한글 레이블 매핑
@@ -129,7 +176,7 @@ except Exception as e:
 frame_queue = queue.Queue(maxsize=3)
 
 def capture_and_process():
-    fps = 15                # 스트리밍 프레임레이트를 8 fps로 설정
+    fps = 15                # 스트리밍 프레임레이트
     interval = 1.0 / fps
     target_size = 320
 
@@ -138,11 +185,14 @@ def capture_and_process():
         ret, frame = camera.read()
         if not ret: continue
 
+        # 온도에 따라 모델 전환 검사
+        maybe_switch_model()
+
         # 동기 inference
         with torch.no_grad():
             results = model(frame, size=target_size)
 
-        # 결과 파싱
+        # 이하 동일: 결과 파싱 → 시각화 → 인코딩 → 큐 업로드
         boxes = []
         for *box, conf, cls in results.xyxy[0]:
             label = results.names[int(cls)]
@@ -150,12 +200,10 @@ def capture_and_process():
             x1, y1, x2, y2 = map(int, box)
             boxes.append((x1, y1, x2, y2, label, float(conf)))
 
-        # OpenCV로 사각형 그리기
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # PIL로 한글 텍스트 그리기
         img_pil = Image.fromarray(frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
         for x1, y1, x2, y2, label, conf in boxes:
@@ -165,7 +213,6 @@ def capture_and_process():
             draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # 인코딩 및 큐 업로드
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
