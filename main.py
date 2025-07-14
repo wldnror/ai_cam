@@ -30,12 +30,34 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) PyTorch 스레드 & 추론 모드 최적화
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
-# force_reload=True 옵션 추가하여 모델 캐시 강제 재다운로드
-model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True, force_reload=True)
-model.eval()
+# 1) YOLOv5 모델 수동 로드 (torch.hub 대신 로컬 .pt 사용)
+WEIGHTS = os.path.join(os.path.dirname(__file__), 'yolov5n.pt')
+if not os.path.exists(WEIGHTS):
+    print(f"Downloading yolov5n.pt to {WEIGHTS}...")
+    torch.hub.download_url_to_file(
+        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt',
+        WEIGHTS
+    )
+
+# ultralytics/yolov5 레포를 ~/yolov5 에 클론해두었다면 로컬 로드
+YOLOROOT = os.path.expanduser('~/yolov5')
+if os.path.isdir(YOLOROOT):
+    import sys
+    sys.path.insert(0, YOLOROOT)
+    from models.common import DetectMultiBackend
+    from utils.torch_utils import select_device
+
+    device = select_device('cpu')
+    model = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
+    model.model.eval()
+else:
+    # 레포 없다면 torch.hub fallback (force_reload 옵션 유지)
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    model = torch.hub.load(
+        'ultralytics/yolov5', 'yolov5n', pretrained=True, force_reload=True
+    )
+    model.eval()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 카메라 인터페이스 정의
@@ -123,12 +145,13 @@ def capture_and_process():
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
-            x1, y1, x2, y2 = map(int, (
-                box[0] * w_ratio,
-                box[1] * h_ratio,
-                box[2] * w_ratio,
-                box[3] * h_ratio
-            ))
+            x1, y1, x2, y2 = map
+                int, (
+                    box[0] * w_ratio, 
+                    box[1] * h_ratio,
+                    box[2] * w_ratio,
+                    box[3] * h_ratio
+                )
             label = last_results.names[int(cls)]
             if label in ('person', 'car'):
                 color = (0,0,255) if label=='person' else (255,0,0)
