@@ -60,10 +60,10 @@ from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
+WEIGHTS = os.path.join(YOLOROOT, 'yolov5s.pt')
 if not os.path.exists(WEIGHTS):
     torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
+        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt', WEIGHTS
     )
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
