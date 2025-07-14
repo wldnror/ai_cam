@@ -31,12 +31,11 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 및 AutoShape 래핑
+# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
-
 sys.path.insert(0, YOLOROOT)
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
@@ -46,10 +45,9 @@ WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
     print(f"Downloading weights to {WEIGHTS}...")
     torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt',
-        WEIGHTS
+        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
     )
-# DetectMultiBackend 로 모델 초기화 후 AutoShape 래핑
+# DetectMultiBackend 로 로드 후 AutoShape 래핑
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
@@ -92,6 +90,7 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
+# CSI 모듈 시도, 실패 시 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -101,25 +100,18 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 프레임 처리 스레드
+# 3) 백그라운드 프레임 처리 스레드
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = (320, 320)
+    target_size = 320  # AutoShape로 크기 지정
     skip_interval = 2
     frame_count = 0
-    last_results = None
-    last_time = time.time()
 
     while True:
-        now = time.time()
-        sleep = interval - (now - last_time)
-        if sleep > 0:
-            time.sleep(sleep)
-        last_time = time.time()
-
+        start = time.time()
         ret, frame = camera.read()
         if not ret:
             continue
@@ -127,35 +119,34 @@ def capture_and_process():
         frame_count += 1
         if frame_count % skip_interval == 0:
             with torch.no_grad():
-                # 모델 입력: AutoShape가 BGR->RGB 및 전처리를 수행
-                last_results = model(frame, size=target_size[0])
+                # AutoShape: BGR->RGB + 전처리 + 후처리
+                results = model(frame, size=target_size)
 
-        if last_results is None:
-            continue
+            # 박스 드로잉
+            for *box, conf, cls in results.xyxy[0]:
+                x1, y1, x2, y2 = map(int, box)
+                label = results.names[int(cls)]
+                if label in ('person', 'car'):
+                    color = (0, 0, 255) if label == 'person' else (255, 0, 0)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # 결과 박스 그리기
-        h_ratio = frame.shape[0] / last_results.orig_shape[0]
-        w_ratio = frame.shape[1] / last_results.orig_shape[1]
-        for *box, conf, cls in last_results.xyxy[0]:
-            x1, y1, x2, y2 = map(int, box)
-            label = last_results.names[int(cls)]
-            if label in ('person', 'car'):
-                color = (0, 0, 255) if label == 'person' else (255, 0, 0)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        # JPEG 인코딩
+        # JPEG로 인코딩 후 큐에 삽입
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
-
-        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
             try:
                 frame_queue.get_nowait()
             except queue.Empty:
                 pass
         frame_queue.put(data)
+
+        # FPS 유지
+        elapsed = time.time() - start
+        sleep = interval - elapsed
+        if sleep > 0:
+            time.sleep(sleep)
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
@@ -185,8 +176,7 @@ def index():
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame',
-                    direct_passthrough=True)
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
