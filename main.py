@@ -11,35 +11,13 @@ werkzeug_log.setLevel(logging.ERROR)
 import os
 import sys
 import time
-import threading
 import queue
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
-
 import cv2
 import torch
 import psutil
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
-FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-if not os.path.exists(FONT_PATH):
-    try:
-        print("한글 폰트가 없어 설치를 시도합니다...")
-        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
-        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
-    except Exception as e:
-        print(f"폰트 설치 실패: {e}")
-
-# 설치 후 폰트 로드
-try:
-    font = ImageFont.truetype(FONT_PATH, 24)
-except Exception:
-    font = ImageFont.load_default()
-    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) 화면 절전/DPMS 비활성화
@@ -76,10 +54,10 @@ backend.model.eval()
 model = AutoShape(backend.model)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 한글 레이블 매핑
+# 레이블 매핑 (영문으로 표기)
 label_map = {
-    'person': '사람',
-    'car':    '자동차'
+    'person': 'Person',
+    'car':    'Car'
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -115,8 +93,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
-                for _ in range(5):
-                    cap.read()
+                for _ in range(5): cap.read()
                 self.cap = cap
                 break
         if not self.cap:
@@ -135,31 +112,13 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) 백그라운드 프레임 처리 스레드
+# 4) 프레임 처리 (동기식)
 frame_queue = queue.Queue(maxsize=3)
-executor = ThreadPoolExecutor(max_workers=4)
-last_boxes = []  # 전역으로 유지할 마지막 감지 결과
-
-def infer_and_update(frame, target_size):
-    global last_boxes
-    with torch.no_grad():
-        results = model(frame, size=target_size)
-    tmp = []
-    for *box, conf, cls in results.xyxy[0]:
-        label = results.names[int(cls)]
-        if label not in label_map:
-            continue
-        x1, y1, x2, y2 = map(int, box)
-        tmp.append((x1, y1, x2, y2, label, float(conf)))
-    if tmp:
-        last_boxes = tmp
 
 def capture_and_process():
-    fps = 10
+    fps = 5  # inference 속도에 맞춰 FPS 설정
     interval = 1.0 / fps
     target_size = 320
-    skip_interval = 2
-    frame_count = 0
 
     while True:
         start = time.time()
@@ -167,42 +126,38 @@ def capture_and_process():
         if not ret:
             continue
 
-        frame_count += 1
+        # 동기 추론
+        with torch.no_grad():
+            results = model(frame, size=target_size)
 
-        if frame_count % skip_interval == 0:
-            executor.submit(infer_and_update, frame.copy(), target_size)
+        # 결과 파싱
+        boxes = []
+        for *box, conf, cls in results.xyxy[0]:
+            label = results.names[int(cls)]
+            if label not in label_map:
+                continue
+            x1, y1, x2, y2 = map(int, box)
+            boxes.append((x1, y1, x2, y2, label, float(conf)))
 
-        # PIL로 그리기 준비
-        img_pil = Image.fromarray(frame[:, :, ::-1])
-        draw = ImageDraw.Draw(img_pil)
+        # OpenCV로 사각형 및 텍스트 그리기
+        for x1, y1, x2, y2, label, conf in boxes:
+            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            text = f"{label_map[label]} {conf * 100:.1f}%"
+            cv2.putText(frame, text, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        for x1, y1, x2, y2, label, conf in last_boxes:
-            # BGR -> RGB
-            color_bgr = (255, 0, 0) if label == 'person' else (0, 0, 255)
-            color = tuple(reversed(color_bgr))
-            # 사각형
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-            # 텍스트
-            text = f"{label_map[label]} {conf*100:.1f}%"
-            text_size = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1 - text_size[1] - 4, x1 + text_size[0] + 4, y1], fill=(0, 0, 0))
-            draw.text((x1 + 2, y1 - text_size[1] - 2), text, font=font, fill=color)
-
-        # 다시 OpenCV BGR 포맷으로 변환
-        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-
+        # JPEG 인코딩 및 큐 업로드
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         data = buf.tobytes()
         if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
+            frame_queue.get_nowait()
         frame_queue.put(data)
 
         elapsed = time.time() - start
         time.sleep(max(0, interval - elapsed))
 
+# 처리 스레드 시작
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -214,15 +169,6 @@ def generate():
         frame = frame_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-def get_network_signal(interface='wlan0'):
-    try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except Exception:
-        return None
 
 @app.route('/')
 def index():
@@ -248,7 +194,11 @@ def stats():
         temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except Exception:
         pass
-    sig = get_network_signal('wlan0')
+    try:
+        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
+    except Exception:
+        sig = None
     return jsonify(
         camera=1,
         cpu_percent=cpu,
