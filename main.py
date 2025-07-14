@@ -31,7 +31,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
+# 1) YOLOv5 모델 로드
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
@@ -67,7 +67,6 @@ class CSICamera:
             self.picam2.capture_array("main")
 
     def read(self):
-        # Picamera2 기본 출력은 RGB → OpenCV 기대 BGR로 변환
         rgb = self.picam2.capture_array("main")
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         return True, bgr
@@ -83,18 +82,16 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5):
-                    cap.read()
+                for _ in range(5): cap.read()
                 self.cap = cap
                 break
         if not self.cap:
             raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
 
     def read(self):
-        # USB cam은 이미 BGR 순서로 반환
         return self.cap.read()
 
-# CSI 모듈 시도, 실패 시 USB
+# CSI 시도, 실패 시 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -110,9 +107,10 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320  # AutoShape 크기 지정
+    target_size = 320
     skip_interval = 2
     frame_count = 0
+    last_boxes = []  # 저장된 박스들
 
     while True:
         start = time.time()
@@ -121,32 +119,42 @@ def capture_and_process():
             continue
 
         frame_count += 1
+
+        # 1) skip_interval 마다 감지
         if frame_count % skip_interval == 0:
             with torch.no_grad():
                 results = model(frame, size=target_size)
 
+            tmp = []
             for *box, conf, cls in results.xyxy[0]:
-                x1, y1, x2, y2 = map(int, box)
                 label = results.names[int(cls)]
-                if label in ('person', 'car'):
-                    color = (0, 0, 255) if label == 'person' else (255, 0, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, label, (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                if label not in ('person', 'car'):
+                    continue
+                x1, y1, x2, y2 = map(int, box)
+                tmp.append((x1, y1, x2, y2, label))
 
+            # **빈 리스트일 때는 덮어쓰지 않고 유지**
+            if tmp:
+                last_boxes = tmp
+
+        # 2) 저장된 박스 항상 그리기
+        for x1, y1, x2, y2, label in last_boxes:
+            color = (0, 0, 255) if label == 'person' else (255, 0, 0)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # 3) JPEG 인코딩 → 큐에 삽입
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
+            try: frame_queue.get_nowait()
+            except queue.Empty: pass
         frame_queue.put(data)
 
+        # 4) FPS 유지
         elapsed = time.time() - start
-        sleep = interval - elapsed
-        if sleep > 0:
-            time.sleep(sleep)
+        time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
