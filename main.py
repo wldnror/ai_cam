@@ -14,11 +14,32 @@ import time
 import threading  # 스레드 모듈 추가
 import queue
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import torch
 import psutil
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+if not os.path.exists(FONT_PATH):
+    try:
+        print("한글 폰트가 없어 설치를 시도합니다...")
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+    except Exception as e:
+        print(f"폰트 설치 실패: {e}")
+
+# 설치 후 폰트 로드
+try:
+    font = ImageFont.truetype(FONT_PATH, 24)
+except Exception:
+    font = ImageFont.load_default()
+    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) 화면 절전/DPMS 비활성화
@@ -55,10 +76,10 @@ backend.model.eval()
 model = AutoShape(backend.model)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 레이블 매핑 (영문으로 표기)
+# 한글 레이블 매핑
 label_map = {
-    'person': 'Person',
-    'car':    'Car'
+    'person': '사람',
+    'car':    '자동차'
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
