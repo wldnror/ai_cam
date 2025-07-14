@@ -31,18 +31,17 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 로드: 로컬 클론 + DetectMultiBackend 사용
+# 1) YOLOv5 모델 로드 및 AutoShape 래핑
 YOLOROOT = os.path.expanduser('~/yolov5')
-# 리포지토리가 없으면 클론
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 
 sys.path.insert(0, YOLOROOT)
-from models.common import DetectMultiBackend
+from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
-# 무거운 torch.hub 사용 대신 직접 .pt 로드
+device = select_device('cpu')
 WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
     print(f"Downloading weights to {WEIGHTS}...")
@@ -50,13 +49,13 @@ if not os.path.exists(WEIGHTS):
         'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt',
         WEIGHTS
     )
-
-device = select_device('cpu')
-model = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
-model.model.eval()
+# DetectMultiBackend 로 모델 초기화 후 AutoShape 래핑
+backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
+backend.model.eval()
+model = AutoShape(backend.model)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 클래스
+# 2) 카메라 클래스 정의
 class CSICamera:
     """CSI 카메라를 Picamera2로 제어"""
     def __init__(self):
@@ -93,7 +92,6 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# 카메라 초기화
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -107,72 +105,112 @@ except Exception as e:
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
-    fps = 10; interval = 1.0/fps
-    target_size=(320,320); skip_interval=2
-    frame_count=0; last=None; last_results=None
+    fps = 10
+    interval = 1.0 / fps
+    target_size = (320, 320)
+    skip_interval = 2
+    frame_count = 0
+    last_results = None
+    last_time = time.time()
+
     while True:
-        now=time.time();
-        if last:
-            sleep=interval-(now-last)
-            if sleep>0: time.sleep(sleep)
-        last=time.time()
+        now = time.time()
+        sleep = interval - (now - last_time)
+        if sleep > 0:
+            time.sleep(sleep)
+        last_time = time.time()
+
         ret, frame = camera.read()
-        if not ret: continue
-        frame_count +=1
-        if frame_count % skip_interval==0:
+        if not ret:
+            continue
+
+        frame_count += 1
+        if frame_count % skip_interval == 0:
             with torch.no_grad():
-                img = cv2.resize(frame, target_size)
-                last_results = model(img)
-        if last_results is None: continue
-        h_ratio=frame.shape[0]/target_size[1]
-        w_ratio=frame.shape[1]/target_size[0]
+                # 모델 입력: AutoShape가 BGR->RGB 및 전처리를 수행
+                last_results = model(frame, size=target_size[0])
+
+        if last_results is None:
+            continue
+
+        # 결과 박스 그리기
+        h_ratio = frame.shape[0] / last_results.orig_shape[0]
+        w_ratio = frame.shape[1] / last_results.orig_shape[1]
         for *box, conf, cls in last_results.xyxy[0]:
-            x1,y1,x2,y2 = map(int, box[0]*w_ratio, box[1]*h_ratio, box[2]*w_ratio, box[3]*h_ratio)
+            x1, y1, x2, y2 = map(int, box)
             label = last_results.names[int(cls)]
-            if label in ('person','car'):
-                col=(0,0,255) if label=='person' else (255,0,0)
-                cv2.rectangle(frame,(x1,y1),(x2,y2),col,2)
-                cv2.putText(frame,label,(x1,y1-10),cv2.FONT_HERSHEY_SIMPLEX,0.6,col,2)
-        _,buf=cv2.imencode('.jpg',frame,[int(cv2.IMWRITE_JPEG_QUALITY),80])
-        data=buf.tobytes()
+            if label in ('person', 'car'):
+                color = (0, 0, 255) if label == 'person' else (255, 0, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # JPEG 인코딩
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        data = buf.tobytes()
+
+        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
-            try: frame_queue.get_nowait()
-            except queue.Empty: pass
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
         frame_queue.put(data)
 
-threading.Thread(target=capture_and_process,daemon=True).start()
+threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱
-app=Flask(__name__)
+# 4) Flask 앱 및 엔드포인트
+app = Flask(__name__)
 
 def generate():
     while True:
-        frame=frame_queue.get()
-        yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n'+frame+b'\r\n')
+        frame = frame_queue.get()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-def get_network_signal(iface='wlan0'):
+def get_network_signal(interface='wlan0'):
     try:
-        out=subprocess.check_output(['iwconfig',iface],stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
         for part in out.split():
-            if part.startswith('level='): return int(part.split('=')[1])
-    except: return None
+            if part.startswith('level='):
+                return int(part.split('=')[1])
+    except Exception:
+        return None
 
 @app.route('/')
-def index(): return render_template('index.html')
+def index():
+    return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    resp=Response(generate(),mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
+    resp = Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame',
+                    direct_passthrough=True)
+    resp.headers.update({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    })
     return resp
 
 @app.route('/stats')
 def stats():
-    cpu=psutil.cpu_percent(interval=0.5); mem=psutil.virtual_memory(); temp=None
-    try: temp=float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except: pass
-    sig=get_network_signal('wlan0')
-    return jsonify(camera=1,cpu_percent=cpu,memory_percent=mem.percent,temperature_c=temp,wifi_signal_dbm=sig)
+    cpu = psutil.cpu_percent(interval=0.5)
+    mem = psutil.virtual_memory()
+    temp = None
+    try:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except Exception:
+        pass
+    sig = get_network_signal('wlan0')
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem.percent,
+        temperature_c=temp,
+        wifi_signal_dbm=sig
+    )
 
-if __name__=='__main__': app.run(host='0.0.0.0',port=5000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
