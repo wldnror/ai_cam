@@ -21,7 +21,7 @@ import psutil
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화 (X 서버가 있을 때만)
+# 0) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
@@ -31,13 +31,12 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (DetectMultiBackend + AutoShape)
+# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
-
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
@@ -46,15 +45,13 @@ WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
     print(f"Downloading weights to {WEIGHTS}...")
     torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt',
-        WEIGHTS
+        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
     )
-
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
 
-# confidence threshold 설정
+# confidence threshold 설정 (기본 0.25 → 필요시 조정)
 model.conf = 0.25
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -98,6 +95,7 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
+# CSI 모듈 시도, 실패 시 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -113,7 +111,7 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320
+    target_size = 320  # AutoShape 인풋 크기
 
     while True:
         start = time.time()
@@ -121,16 +119,16 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 추론 및 렌더
+        # 1) 추론 & 렌더링
         with torch.no_grad():
             results = model(frame, size=target_size)
-            results.render()
+            results.render()  # frame 위에 박스와 라벨을 그림
 
-        # 수정: .imgs → .ims
-        annotated = results.ims[0]
+        # 2) 결과 가져오기 (RGB → BGR)
+        annotated = results.imgs[0]
         frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
 
-        # JPEG 인코딩
+        # 3) JPEG 인코딩 & 큐에 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
@@ -140,14 +138,16 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
-        # FPS 유지
+        # 4) FPS 유지
         elapsed = time.time() - start
-        time.sleep(max(0, interval - elapsed))
+        sleep = interval - elapsed
+        if sleep > 0:
+            time.sleep(sleep)
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 & 엔드포인트
+# 4) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
