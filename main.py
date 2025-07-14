@@ -32,7 +32,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (DetectMultiBackend + AutoShape)
+# 1) YOLOv5 모델 로드
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
@@ -60,20 +60,27 @@ class USBCamera:
         self.open()
 
     def open(self):
-        # /dev/video*에서 사용 가능한 디바이스 검색
         device_paths = sorted(glob.glob('/dev/video*'))
         for dev in device_paths:
             cap = cv2.VideoCapture(dev)
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5):
-                    cap.read()
-                self.cap = cap
-                print(f"[INFO] Opened camera device: {dev}")
-                return
+            if not cap.isOpened():
+                cap.release()
+                continue
+            # 초기 프레임 수신 확인
+            ret, _ = cap.read()
+            if not ret:
+                cap.release()
+                continue
+            # 카메라 설정 적용
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # 버퍼 비우기
+            for _ in range(5): cap.read()
+            self.cap = cap
+            print(f"[INFO] Opened camera device: {dev}")
+            return
         raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
 
     def restart(self):
@@ -99,10 +106,9 @@ except Exception as e:
 print(">>> Using USB webcam only")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 큐 및 쓰레드 구조
+# 3) 캡처 및 추론 쓰레드 구조
 raw_queue = queue.Queue(maxsize=2)
 frame_queue = queue.Queue(maxsize=2)
-
 _last_frame_time = time.time()
 
 def capture_loop():
@@ -129,14 +135,8 @@ def capture_loop():
 
 
 def inference_loop():
-    fps = 10
-    interval = 1.0 / fps
-    target_size = 320
-    skip_interval = 2
-    count = 0
-    last_log = time.time()
-    infer_count = 0
-
+    fps = 10; interval = 1.0 / fps; target_size = 320; skip_interval = 2
+    count = 0; last_log = time.time(); infer_count = 0
     while True:
         start = time.time()
         try:
@@ -153,33 +153,29 @@ def inference_loop():
                     results = model(frame, size=target_size)
                 inf_time = (time.time() - inf_start) * 1000
                 infer_count += 1
-
                 if infer_count % 10 == 0:
                     now = time.time()
                     real_fps = 10 / (now - last_log)
                     print(f"[INFO] Inference FPS: {real_fps:.2f}, Avg latency: {inf_time:.1f} ms")
                     last_log = now
-
                 for *box, conf, cls in results.xyxy[0]:
                     x1, y1, x2, y2 = map(int, box)
                     label = results.names[int(cls)]
-                    if label in ('person', 'car'):
+                    if label in ('person','car'):
                         color = (0,0,255) if label=='person' else (255,0,0)
-                        cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
-                        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
+                        cv2.putText(frame,label,(x1,y1-10),cv2.FONT_HERSHEY_SIMPLEX,0.6,color,2)
             except Exception as e:
                 print(f"[ERROR] Inference exception: {e}")
 
         try:
             _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY),80])
-            if not frame_queue.full():
-                frame_queue.put(buf.tobytes())
+            if not frame_queue.full(): frame_queue.put(buf.tobytes())
         except Exception as e:
             print(f"[ERROR] JPEG encoding exception: {e}")
 
         elapsed = time.time() - start
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
+        if elapsed < interval: time.sleep(interval - elapsed)
 
 threading.Thread(target=capture_loop, daemon=True).start()
 threading.Thread(target=inference_loop, daemon=True).start()
@@ -191,17 +187,17 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n'
+        yield (b'--frame\r\n' +
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
-def index():
-    return render_template('index.html')
+def index(): return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate', 'Pragma':'no-cache','Expires':'0'})
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate',
+                         'Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
@@ -209,19 +205,16 @@ def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
     temp = None
-    try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except:
-        pass
+    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except: pass
     sig = None
     try:
         out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         for p in out.split():
-            if p.startswith('level='):
-                sig = int(p.split('=')[1])
-    except:
-        pass
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig)
+            if p.startswith('level='): sig = int(p.split('=')[1])
+    except: pass
+    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem,
+                   temperature_c=temp, wifi_signal_dbm=sig)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
