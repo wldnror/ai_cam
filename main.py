@@ -56,6 +56,13 @@ backend.model.eval()
 model = AutoShape(backend.model)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 한글 레이블 매핑
+label_map = {
+    'person': '사람',
+    'car':    '자동차'
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 2) 카메라 클래스 정의
 class CSICamera:
     """CSI 카메라를 Picamera2로 제어"""
@@ -120,10 +127,10 @@ def infer_and_update(frame, target_size):
     tmp = []
     for *box, conf, cls in results.xyxy[0]:
         label = results.names[int(cls)]
-        if label not in ('person', 'car'):
+        if label not in label_map:
             continue
         x1, y1, x2, y2 = map(int, box)
-        tmp.append((x1, y1, x2, y2, label))
+        tmp.append((x1, y1, x2, y2, label, float(conf)))
     if tmp:
         last_boxes = tmp
 
@@ -147,10 +154,12 @@ def capture_and_process():
             executor.submit(infer_and_update, frame.copy(), target_size)
 
         # 2) 저장된 박스 항상 그리기
-        for x1, y1, x2, y2, label in last_boxes:
-            color = (0, 0, 255) if label == 'person' else (255, 0, 0)
+        for x1, y1, x2, y2, label, conf in last_boxes:
+            # 사람은 파랑(BGR), 자동차는 빨강
+            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
+            text = f"{label_map[label]} {conf*100:.1f}%"
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, label, (x1, y1 - 10),
+            cv2.putText(frame, text, (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # 3) JPEG 인코딩 → 큐에 삽입
