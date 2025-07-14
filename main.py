@@ -31,7 +31,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 & 스레드 수 조정
+# 1) YOLOv5 모델 로드 & PyTorch 스레드 수 조정
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
 
@@ -62,9 +62,9 @@ class CSICamera:
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)},
-            lores={"size": (640, 360)},
-            buffer_count=6      # 버퍼 개수 증가
+            main={"size": (1280, 720)}, 
+            lores={"size": (640, 360)}, 
+            buffer_count=6       # 기본 2 → 6으로 증가
         )
         self.picam2.configure(cfg)
         self.picam2.start()
@@ -86,7 +86,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)  # 버퍼 개수 증가
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)  # 기본 1 → 4으로 증가
                 for _ in range(5): cap.read()
                 self.cap = cap
                 break
@@ -107,8 +107,7 @@ except Exception as e:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3) 백그라운드 프레임 처리 스레드
--frame_queue = queue.Queue(maxsize=1)
-+frame_queue = queue.Queue(maxsize=3)  # 큐 크기 증가
+frame_queue = queue.Queue(maxsize=3)  # 기본 1 → 3으로 증가
 
 def capture_and_process():
     fps = 10
@@ -151,7 +150,7 @@ def capture_and_process():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # 3) JPEG 인코딩 → 큐에 삽입
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])  # 압축률 최적화
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])  # 80 → 60으로 조정
         data = buf.tobytes()
         if not frame_queue.empty():
             try: frame_queue.get_nowait()
