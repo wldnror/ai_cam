@@ -168,7 +168,7 @@ def inference_loop():
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
         # 인코딩 및 큐 업로드
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         if output_queue.full():
             try: output_queue.get_nowait()
             except queue.Empty: pass
