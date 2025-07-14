@@ -11,6 +11,7 @@ werkzeug_log.setLevel(logging.ERROR)
 import os
 import sys
 import time
+import threading  # 스레드 모듈 추가
 import queue
 import subprocess
 import cv2
