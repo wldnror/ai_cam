@@ -47,7 +47,6 @@ if not os.path.exists(WEIGHTS):
     torch.hub.download_url_to_file(
         'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
     )
-# DetectMultiBackend 로 로드 후 AutoShape 래핑
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
@@ -110,6 +109,10 @@ def capture_and_process():
     skip_interval = 2
     frame_count = 0
 
+    # FPS 로그용 변수
+    last_log_time = time.time()
+    infer_count = 0
+
     while True:
         start = time.time()
         ret, frame = camera.read()
@@ -118,9 +121,18 @@ def capture_and_process():
 
         frame_count += 1
         if frame_count % skip_interval == 0:
+            infer_start = time.time()
             with torch.no_grad():
-                # AutoShape: BGR->RGB + 전처리 + 후처리
                 results = model(frame, size=target_size)
+            infer_time = time.time() - infer_start
+            infer_count += 1
+
+            # 10회마다 실제 추론 FPS 및 레이턴시 로그 출력
+            if infer_count % 10 == 0:
+                now = time.time()
+                real_fps = 10 / (now - last_log_time)
+                print(f"[INFO] Inference FPS: {real_fps:.2f}, Avg latency: {infer_time*1000:.1f} ms")
+                last_log_time = now
 
             # 박스 드로잉
             for *box, conf, cls in results.xyxy[0]:
