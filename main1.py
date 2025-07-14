@@ -129,7 +129,7 @@ except Exception as e:
 frame_queue = queue.Queue(maxsize=3)
 
 def capture_and_process():
-    fps = 8                # 스트리밍 프레임레이트를 8 fps로 설정
+    fps = 15                # 스트리밍 프레임레이트를 8 fps로 설정
     interval = 1.0 / fps
     target_size = 320
 
