@@ -21,7 +21,7 @@ import psutil
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화
+# 0) 화면 절전/DPMS 비활성화 (X 서버가 있을 때만)
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
@@ -31,25 +31,32 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
+# 1) YOLOv5 모델 로드 (DetectMultiBackend + AutoShape)
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
+
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
+# 디바이스 설정
 device = select_device('cpu')
 WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
     print(f"Downloading weights to {WEIGHTS}...")
     torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
+        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt',
+        WEIGHTS
     )
+
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
+
+# confidence threshold 조정 (0.0~1.0)
+model.conf = 0.25
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 카메라 클래스 정의
@@ -63,11 +70,11 @@ class CSICamera:
         )
         self.picam2.configure(cfg)
         self.picam2.start()
+        # 워밍업 프레임 드랍
         for _ in range(3):
             self.picam2.capture_array("main")
 
     def read(self):
-        # Picamera2 기본 출력은 RGB → OpenCV 기대 BGR로 변환
         rgb = self.picam2.capture_array("main")
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         return True, bgr
@@ -91,10 +98,9 @@ class USBCamera:
             raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
 
     def read(self):
-        # USB cam은 이미 BGR 순서로 반환
         return self.cap.read()
 
-# CSI 모듈 시도, 실패 시 USB
+# CSI 카메라 우선, 실패하면 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -110,9 +116,7 @@ frame_queue = queue.Queue(maxsize=1)
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320  # AutoShape 크기 지정
-    skip_interval = 2
-    frame_count = 0
+    target_size = 320  # AutoShape 인풋 크기
 
     while True:
         start = time.time()
@@ -120,20 +124,16 @@ def capture_and_process():
         if not ret:
             continue
 
-        frame_count += 1
-        if frame_count % skip_interval == 0:
-            with torch.no_grad():
-                results = model(frame, size=target_size)
+        # 1) 모델 추론 & 렌더링
+        with torch.no_grad():
+            results = model(frame, size=target_size)
+            results.render()  # frame 위에 박스 & 라벨 그리기
 
-            for *box, conf, cls in results.xyxy[0]:
-                x1, y1, x2, y2 = map(int, box)
-                label = results.names[int(cls)]
-                if label in ('person', 'car'):
-                    color = (0, 0, 255) if label == 'person' else (255, 0, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, label, (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # 2) 렌더된 이미지 가져와 BGR로 변환
+        annotated = results.imgs[0]
+        frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
 
+        # 3) JPEG 인코딩 & 큐에 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
         if not frame_queue.empty():
@@ -143,10 +143,9 @@ def capture_and_process():
                 pass
         frame_queue.put(data)
 
+        # 4) FPS 유지
         elapsed = time.time() - start
-        sleep = interval - elapsed
-        if sleep > 0:
-            time.sleep(sleep)
+        time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
@@ -171,7 +170,7 @@ def get_network_signal(interface='wlan0'):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html')  # index.html 안에 <img src="/video_feed"> 필요
 
 @app.route('/video_feed')
 def video_feed():
