@@ -21,8 +21,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
-# 외부 트래커 SORT
-from sort import Sort
+# ④ DeepSORT 트래커 불러오기
+from deep_sort_realtime.deepsort_tracker import DeepSort  #  [oai_citation:0‡PyPI](https://pypi.org/project/deep-sort-realtime/)
 
 # ----------------------------------------
 # 0) 한글 폰트 설치 확인 및 로드
@@ -133,8 +133,8 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 트래커 & 프레임 처리
-tracker = Sort(max_age=10, min_hits=3, iou_threshold=0.3)
+# 4) DeepSORT 트래커 & 프레임 처리
+tracker = DeepSort(max_age=10)  # 트랙은 최대 10프레임까지 유지  [oai_citation:1‡PyPI](https://pypi.org/project/deep-sort-realtime/)
 
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
@@ -156,30 +156,32 @@ def capture_and_process():
         with torch.no_grad():
             results = model(frame, size=target_size)
 
-        # 박스 리스트 준비 ([x1,y1,x2,y2,conf])
-        dets = []
-        cls_list = []
+        # DeepSORT용 detections 준비
+        bbs = []
         for *box, conf, cls in results.xyxy[0]:
             label = results.names[int(cls)]
             if label not in label_map:
                 continue
             x1, y1, x2, y2 = map(int, box)
-            dets.append([x1, y1, x2, y2, float(conf)])
-            cls_list.append(label)
+            w, h = x2 - x1, y2 - y1
+            # ([left,top,width,height], confidence, class)
+            bbs.append(([x1, y1, w, h], float(conf), label))  #  [oai_citation:2‡PyPI](https://pypi.org/project/deep-sort-realtime/)
 
-        dets_np = np.array(dets) if dets else np.empty((0,5))
-
-        # SORT 업데이트 → 트랙들 반환
-        tracks = tracker.update(dets_np)
+        # DeepSORT 업데이트 → Track 객체 리스트 반환
+        tracks = tracker.update_tracks(bbs, frame=frame)
 
         # 트랙마다 상자 그리기
-        for trk in tracks:
-            x1, y1, x2, y2, track_id = trk.astype(int)
-            # 트랙 ID에 매핑되는 라벨 색인 찾기 (간단히 IoU로 매칭)
-            color = (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, f"ID:{track_id}",
-                        (x1, y1 - 10),
+        for track in tracks:
+            if not track.is_confirmed():
+                continue
+            tid = track.track_id
+            l, t, r, b = track.to_ltrb()  # left, top, right, bottom
+            cls = track.det_class  # detection_class에 지정한 값
+            color = (255,0,0) if cls=='person' else (0,0,255)
+            cv2.rectangle(frame, (int(l),int(t)), (int(r),int(b)), color, 2)
+            cv2.putText(frame,
+                        f"{label_map.get(cls,cls)} {tid}",
+                        (int(l), int(t)-10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
         # JPEG 인코딩 및 큐 관리
@@ -226,11 +228,10 @@ def video_feed():
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
-    temp = None
     try:
         temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except Exception:
-        pass
+        temp = None
     try:
         out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
