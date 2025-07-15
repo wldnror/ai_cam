@@ -4,17 +4,39 @@ import psutil
 import subprocess
 from flask import Flask, Response, render_template, jsonify
 
-app = Flask(__name__)
+# CSI 카메라 (Picamera2) 지원 여부 확인
+try:
+    from picamera2 import Picamera2
+    has_picam = True
+except ImportError:
+    has_picam = False
 
-
-def generate():
+# 카메라 초기화
+if has_picam:
+    picam2 = Picamera2()
+    config = picam2.create_video_configuration(main={"size": (1280, 720)})
+    picam2.configure(config)
+    picam2.start()
+else:
     cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     if not cap.isOpened():
         raise RuntimeError('카메라를 시작할 수 없습니다.')
+
+app = Flask(__name__)
+
+def generate():
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
+        if has_picam:
+            # Picamera2에서 프레임 읽기 (RGB -> BGR 변환)
+            rgb = picam2.capture_array()
+            frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        else:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+        # JPEG 인코딩
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
             continue
@@ -24,7 +46,6 @@ def generate():
 
 @app.route('/')
 def index():
-    # 기존 index.html 템플릿을 그대로 사용합니다.
     return render_template('index.html')
 
 @app.route('/video_feed')
@@ -33,7 +54,6 @@ def video_feed():
         generate(),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
-    # 캐시 방지 헤더
     resp.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
