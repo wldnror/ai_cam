@@ -150,8 +150,8 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────────────────────
 frame_queue = queue.Queue(maxsize=3)
 
-# tracking 준비
-trackers = cv2.MultiTracker_create()
+# tracking 준비: cv2.legacy 네임스페이스 사용
+trackers = cv2.legacy.MultiTracker_create()
 tracking_ids = []
 next_id = 0
 REDTECT_INTERVAL = 30
@@ -185,7 +185,7 @@ def capture_and_process():
                 x1,y1,x2,y2 = map(int, box)
                 dets.append((x1, y1, x2-x1, y2-y1, lbl, float(conf)))
 
-            trackers = cv2.MultiTracker_create()
+            trackers = cv2.legacy.MultiTracker_create()
             tracking_ids.clear()
 
             for x,y,w,h,lbl,conf in dets:
@@ -194,7 +194,7 @@ def capture_and_process():
                 tracking_ids.append((next_id, lbl))
                 next_id += 1
 
-            boxes_to_draw = [ (x,y,x+w,y+h,lbl,conf) for x,y,w,h,lbl,conf in dets ]
+            boxes_to_draw = [(x,y,x+w,y+h,lbl,conf) for x,y,w,h,lbl,conf in dets]
 
         else:
             ok, boxes = trackers.update(frame)
@@ -205,7 +205,7 @@ def capture_and_process():
                 _id, lbl = tracking_ids[idx]
                 boxes_to_draw.append((int(x), int(y), int(x+w), int(y+h), lbl, None))
 
-            # 중간 재감지로 신규 객체 추가 (옵션)
+            # 중간 재감지로 신규 객체 추가(옵션)
             if frame_count % REDTECT_INTERVAL == 0:
                 with torch.no_grad():
                     results2 = model(frame, size=target_size)
