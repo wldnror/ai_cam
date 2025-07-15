@@ -14,6 +14,7 @@ import time
 import threading
 import queue
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import torch
@@ -31,7 +32,10 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
+# 1) PyTorch 스레드 수 & YOLOv5 모델 로드
+torch.set_num_threads(8)
+torch.set_num_interop_threads(8)
+
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
@@ -51,9 +55,6 @@ backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
 
-# confidence threshold 설정 (기본 0.25 → 필요시 조정)
-model.conf = 0.25
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) 카메라 클래스 정의
 class CSICamera:
@@ -62,7 +63,9 @@ class CSICamera:
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2
+            main={"size": (1280, 720)},
+            lores={"size": (640, 360)},
+            buffer_count=6
         )
         self.picam2.configure(cfg)
         self.picam2.start()
@@ -84,7 +87,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
                 for _ in range(5):
                     cap.read()
                 self.cap = cap
@@ -95,7 +98,7 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# CSI 모듈 시도, 실패 시 USB
+# CSI 시도, 실패 시 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -106,12 +109,30 @@ except Exception as e:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3) 백그라운드 프레임 처리 스레드
-frame_queue = queue.Queue(maxsize=1)
+frame_queue = queue.Queue(maxsize=3)
+executor = ThreadPoolExecutor(max_workers=4)
+last_boxes = []  # 전역으로 유지할 마지막 감지 결과
+
+def infer_and_update(frame, target_size):
+    global last_boxes
+    with torch.no_grad():
+        results = model(frame, size=target_size)
+    tmp = []
+    for *box, conf, cls in results.xyxy[0]:
+        label = results.names[int(cls)]
+        if label not in ('person', 'car'):
+            continue
+        x1, y1, x2, y2 = map(int, box)
+        tmp.append((x1, y1, x2, y2, label))
+    if tmp:
+        last_boxes = tmp
 
 def capture_and_process():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320  # AutoShape 인풋 크기
+    target_size = 320
+    skip_interval = 2
+    frame_count = 0
 
     while True:
         start = time.time()
@@ -119,17 +140,21 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 1) 추론 & 렌더링
-        with torch.no_grad():
-            results = model(frame, size=target_size)
-            results.render()  # frame 위에 박스와 라벨을 그림
+        frame_count += 1
 
-        # 2) 결과 가져오기 (RGB → BGR)
-        annotated = results.imgs[0]
-        frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
+        # 1) skip_interval 마다 비동기 추론 제출
+        if frame_count % skip_interval == 0:
+            executor.submit(infer_and_update, frame.copy(), target_size)
 
-        # 3) JPEG 인코딩 & 큐에 저장
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        # 2) 저장된 박스 항상 그리기
+        for x1, y1, x2, y2, label in last_boxes:
+            color = (0, 0, 255) if label == 'person' else (255, 0, 0)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # 3) JPEG 인코딩 → 큐에 삽입
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         data = buf.tobytes()
         if not frame_queue.empty():
             try:
@@ -140,9 +165,7 @@ def capture_and_process():
 
         # 4) FPS 유지
         elapsed = time.time() - start
-        sleep = interval - elapsed
-        if sleep > 0:
-            time.sleep(sleep)
+        time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
