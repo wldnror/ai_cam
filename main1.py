@@ -132,7 +132,7 @@ except Exception as e:
 frame_queue = queue.Queue(maxsize=3)
 
 def capture_and_process():
-    fps = 30; interval = 1.0 / fps; target_size = 200
+    fps = 30; interval = 1.0 / fps; target_size = 500
     while True:
         start = time.time()
         ret, frame = camera.read()
