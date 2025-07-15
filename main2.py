@@ -16,17 +16,19 @@ if has_picam:
     picam2 = Picamera2()
     config = picam2.create_video_configuration(main={"size": (1280, 720)})
     picam2.configure(config)
+    # 먼저 프리뷰 시도
+    try:
+        picam2.start_preview(Preview.DRM)
+    except RuntimeError:
+        # 이미 이벤트 루프가 실행 중이면 무시
+        pass
     picam2.start()
-    # DRM/KMS 프리뷰 시작 (데스크탑 UI 없이도 HDMI에 영상 출력)
-    picam2.start_preview(Preview.DRM)
 else:
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     if not cap.isOpened():
         raise RuntimeError('카메라를 시작할 수 없습니다.')
-    # USB 카메라인 경우, DRM 프리뷰가 지원되지 않습니다.
-    # 데스크탑 UI가 없으면 로컬 프리뷰는 불가능하고, 웹 스트리밍만 사용해야 합니다.
 
 app = Flask(__name__)
 
@@ -39,6 +41,7 @@ def generate():
             ret, frame = cap.read()
             if not ret:
                 continue
+
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
             continue
