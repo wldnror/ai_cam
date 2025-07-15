@@ -70,7 +70,6 @@ CURRENT_MODEL = None
 LAST_SWITCH = 0
 SWITCH_INTERVAL = 10  # 온도 체크 및 전환 주기 (초)
 
-
 def load_model(weights_name):
     """주어진 가중치 파일로 모델 로드"""
     global backend, model, CURRENT_MODEL
@@ -86,14 +85,12 @@ def load_model(weights_name):
     CURRENT_MODEL = weights_name
     print(f"[MODEL] Loaded {weights_name}")
 
-
 def get_cpu_temp():
     """CPU 온도를 °C 단위로 반환"""
     try:
         return float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except:
         return None
-
 
 def maybe_switch_model():
     """SWITCH_INTERVAL 간격으로 온도를 체크해 모델을 전환"""
@@ -124,23 +121,26 @@ label_map = {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 카메라 클래스 정의
+# 3) 카메라 클래스 정의 (CSI 카메라: RGB888 포맷 명시)
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)},
+            main={"size": (1280, 720), "format": "RGB888"},
             lores={"size": (640, 360)},
             buffer_count=6
         )
         self.picam2.configure(cfg)
         self.picam2.start()
+        # 초기 워밍업 프레임
         for _ in range(3):
             self.picam2.capture_array("main")
 
     def read(self):
+        # 이제 capture_array가 RGB888로 나오므로
         rgb = self.picam2.capture_array("main")
+        # OpenCV가 BGR을 사용하므로 RGB→BGR 변환
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         return True, bgr
 
@@ -183,27 +183,30 @@ def capture_and_process():
     while True:
         start = time.time()
         ret, frame = camera.read()
-        if not ret: continue
+        if not ret:
+            continue
 
-        # 온도에 따라 모델 전환 검사
         maybe_switch_model()
 
-        # 동기 inference
+        # inference
         with torch.no_grad():
             results = model(frame, size=target_size)
 
-        # 이하 동일: 결과 파싱 → 시각화 → 인코딩 → 큐 업로드
+        # 결과 파싱
         boxes = []
         for *box, conf, cls in results.xyxy[0]:
             label = results.names[int(cls)]
-            if label not in label_map: continue
+            if label not in label_map:
+                continue
             x1, y1, x2, y2 = map(int, box)
             boxes.append((x1, y1, x2, y2, label, float(conf)))
 
+        # 박스 그리기 (BGR 순)
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
+        # PIL 드로잉
         img_pil = Image.fromarray(frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
         for x1, y1, x2, y2, label, conf in boxes:
@@ -213,6 +216,7 @@ def capture_and_process():
             draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
+        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
