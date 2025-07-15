@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import warnings
 warnings.filterwarnings("ignore")  # 모든 파이썬 경고 억제
@@ -20,9 +21,6 @@ import psutil
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
-
-# ④ DeepSORT 트래커 불러오기
-from deep_sort_realtime.deepsort_tracker import DeepSort  #  [oai_citation:0‡PyPI](https://pypi.org/project/deep-sort-realtime/)
 
 # ----------------------------------------
 # 0) 한글 폰트 설치 확인 및 로드
@@ -133,9 +131,7 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) DeepSORT 트래커 & 프레임 처리
-tracker = DeepSort(max_age=10)  # 트랙은 최대 10프레임까지 유지  [oai_citation:1‡PyPI](https://pypi.org/project/deep-sort-realtime/)
-
+# 4) 프레임 처리 (동기식 파이프라인) 및 FPS 계산
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
@@ -152,62 +148,66 @@ def capture_and_process():
         if not ret:
             continue
 
-        # YOLO 검출
+        # 객체 검출
         with torch.no_grad():
             results = model(frame, size=target_size)
 
-        # DeepSORT용 detections 준비
-        bbs = []
+        # 검출된 박스 수집
+        boxes = []
         for *box, conf, cls in results.xyxy[0]:
             label = results.names[int(cls)]
             if label not in label_map:
                 continue
             x1, y1, x2, y2 = map(int, box)
-            w, h = x2 - x1, y2 - y1
-            # ([left,top,width,height], confidence, class)
-            bbs.append(([x1, y1, w, h], float(conf), label))  #  [oai_citation:2‡PyPI](https://pypi.org/project/deep-sort-realtime/)
+            boxes.append((x1, y1, x2, y2, label, float(conf)))
 
-        # DeepSORT 업데이트 → Track 객체 리스트 반환
-        tracks = tracker.update_tracks(bbs, frame=frame)
+        # 박스 그리기
+        for x1, y1, x2, y2, label, conf in boxes:
+            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # 트랙마다 상자 그리기
-        for track in tracks:
-            if not track.is_confirmed():
-                continue
-            tid = track.track_id
-            l, t, r, b = track.to_ltrb()  # left, top, right, bottom
-            cls = track.det_class  # detection_class에 지정한 값
-            color = (255,0,0) if cls=='person' else (0,0,255)
-            cv2.rectangle(frame, (int(l),int(t)), (int(r),int(b)), color, 2)
-            cv2.putText(frame,
-                        f"{label_map.get(cls,cls)} {tid}",
-                        (int(l), int(t)-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        # 텍스트 오버레이
+        img_pil = Image.fromarray(frame[:, :, ::-1])
+        draw = ImageDraw.Draw(img_pil)
+        for x1, y1, x2, y2, label, conf in boxes:
+            text = f"{label_map[label]} {conf*100:.1f}%"
+            size = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0, 0, 0))
+            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
+        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # JPEG 인코딩 및 큐 관리
+        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+
+        # 큐 관리
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # FPS 계산
+        # FPS 계산 및 저장
         elapsed = time.time() - start
+        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
         with fps_lock:
-            current_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+            current_fps = instant_fps
 
+        # 주기 조절
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ----------------------------------------
-# 5) Flask 앱 & 엔드포인트
+# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n'
+            + frame +
+            b'\r\n'
+        )
 
 @app.route('/')
 def index():
@@ -215,8 +215,7 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
@@ -228,10 +227,11 @@ def video_feed():
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
+    temp = None
     try:
         temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except Exception:
-        temp = None
+        pass
     try:
         out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
@@ -239,7 +239,7 @@ def stats():
         sig = None
 
     with fps_lock:
-        fps_val = round(current_fps, 1)
+        fps = round(current_fps, 1)
 
     return jsonify(
         camera=1,
@@ -247,7 +247,7 @@ def stats():
         memory_percent=mem,
         temperature_c=temp,
         wifi_signal_dbm=sig,
-        fps=fps_val
+        fps=fps
     )
 
 if __name__ == '__main__':
