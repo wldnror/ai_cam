@@ -14,15 +14,31 @@ import time
 import threading
 import queue
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
-
 import cv2
 import torch
 import psutil
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화
+# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+if not os.path.exists(FONT_PATH):
+    try:
+        print("한글 폰트가 없어 설치를 시도합니다...")
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+    except Exception as e:
+        print(f"폰트 설치 실패: {e}")
+try:
+    font = ImageFont.truetype(FONT_PATH, 24)
+except Exception:
+    font = ImageFont.load_default()
+    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
@@ -32,33 +48,66 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) PyTorch 스레드 수 & YOLOv5 모델 로드
+# 2) PyTorch 스레드 수 & YOLOv5 모델 로드 (동적 전환)
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
 
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
-    print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
-if not os.path.exists(WEIGHTS):
-    print(f"Downloading weights to {WEIGHTS}...")
-    torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
-    )
-backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
-backend.model.eval()
-model = AutoShape(backend.model)
+
+MODEL_CONFIGS = [
+    {"name": "yolov5m.pt", "threshold_max": 65},
+    {"name": "yolov5n.pt", "threshold_max": 100},
+]
+CURRENT_MODEL = None
+LAST_SWITCH = 0
+SWITCH_INTERVAL = 10  # 초
+
+def load_model(weights_name):
+    global backend, model, CURRENT_MODEL
+    path = os.path.join(YOLOROOT, weights_name)
+    if not os.path.exists(path):
+        torch.hub.download_url_to_file(
+            f'https://github.com/ultralytics/yolov5/releases/download/v7.0/{weights_name}',
+            path
+        )
+    backend = DetectMultiBackend(path, device=device, fuse=True)
+    backend.model.eval()
+    model = AutoShape(backend.model)
+    CURRENT_MODEL = weights_name
+    print(f"[MODEL] Loaded {weights_name}")
+
+def get_cpu_temp():
+    try:
+        return float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except:
+        return None
+
+def maybe_switch_model():
+    global LAST_SWITCH
+    now = time.time()
+    if now - LAST_SWITCH < SWITCH_INTERVAL: return
+    LAST_SWITCH = now
+    temp = get_cpu_temp()
+    if temp is None: return
+    for cfg in MODEL_CONFIGS:
+        if temp <= cfg['threshold_max'] and cfg['name'] != CURRENT_MODEL:
+            load_model(cfg['name'])
+            break
+
+load_model(MODEL_CONFIGS[0]['name'])
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 클래스 정의
+label_map = {'person': '사람', 'car': '자동차'}
+
+# ──────────────────────────────────────────────────────────────────────────────
 class CSICamera:
-    """CSI 카메라를 Picamera2로 제어"""
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
@@ -71,14 +120,11 @@ class CSICamera:
         self.picam2.start()
         for _ in range(3):
             self.picam2.capture_array("main")
-
     def read(self):
         rgb = self.picam2.capture_array("main")
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        return True, bgr
+        return True, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 class USBCamera:
-    """USB 웹캠을 OpenCV로 제어"""
     def __init__(self):
         self.cap = None
         for i in range(5):
@@ -88,89 +134,111 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
-                for _ in range(5):
-                    cap.read()
-                self.cap = cap
-                break
+                for _ in range(5): cap.read()
+                self.cap = cap; break
         if not self.cap:
-            raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
-
+            raise RuntimeError("웹캠 없음")
     def read(self):
         return self.cap.read()
 
-# CSI 시도, 실패 시 USB
 try:
-    camera = CSICamera()
-    print(">>> Using CSI camera module")
+    camera = CSICamera(); print(">>> CSI camera")
 except Exception as e:
     print(f"[ERROR] CSI init failed: {e}")
-    camera = USBCamera()
-    print(">>> Using USB webcam")
+    camera = USBCamera(); print(">>> USB camera")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 백그라운드 프레임 처리 스레드
 frame_queue = queue.Queue(maxsize=3)
-executor = ThreadPoolExecutor(max_workers=4)
-last_boxes = []  # 전역으로 유지할 마지막 감지 결과
 
-def infer_and_update(frame, target_size):
-    global last_boxes
-    with torch.no_grad():
-        results = model(frame, size=target_size)
-    tmp = []
-    for *box, conf, cls in results.xyxy[0]:
-        label = results.names[int(cls)]
-        if label not in ('person', 'car'):
-            continue
-        x1, y1, x2, y2 = map(int, box)
-        tmp.append((x1, y1, x2, y2, label))
-    if tmp:
-        last_boxes = tmp
+# tracking 준비
+trackers = cv2.MultiTracker_create()
+tracking_ids = []
+next_id = 0
+REDTECT_INTERVAL = 30
+frame_count = 0
+DETECT_CONF_THRESH = 0.4
 
 def capture_and_process():
-    fps = 10
+    global trackers, tracking_ids, next_id, frame_count
+
+    fps = 15
     interval = 1.0 / fps
     target_size = 320
-    skip_interval = 2
-    frame_count = 0
 
     while True:
         start = time.time()
         ret, frame = camera.read()
-        if not ret:
-            continue
-
+        if not ret: continue
         frame_count += 1
 
-        # 1) skip_interval 마다 비동기 추론 제출
-        if frame_count % skip_interval == 0:
-            executor.submit(infer_and_update, frame.copy(), target_size)
+        maybe_switch_model()
 
-        # 2) 저장된 박스 항상 그리기
-        for x1, y1, x2, y2, label in last_boxes:
-            color = (0, 0, 255) if label == 'person' else (255, 0, 0)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, label, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # 재감지 주기 또는 트래커가 없을 때
+        if frame_count % REDTECT_INTERVAL == 1 or len(tracking_ids) == 0:
+            with torch.no_grad():
+                results = model(frame, size=target_size)
+            dets = []
+            for *box, conf, cls in results.xyxy[0]:
+                if float(conf) < DETECT_CONF_THRESH: continue
+                lbl = results.names[int(cls)]
+                if lbl not in label_map: continue
+                x1,y1,x2,y2 = map(int, box)
+                dets.append((x1, y1, x2-x1, y2-y1, lbl, float(conf)))
 
-        # 3) JPEG 인코딩 → 큐에 삽입
+            trackers = cv2.MultiTracker_create()
+            tracking_ids.clear()
+
+            for x,y,w,h,lbl,conf in dets:
+                trk = cv2.legacy.TrackerCSRT_create()
+                trackers.add(trk, frame, (x,y,w,h))
+                tracking_ids.append((next_id, lbl))
+                next_id += 1
+
+            boxes_to_draw = [ (x,y,x+w,y+h,lbl,conf) for x,y,w,h,lbl,conf in dets ]
+
+        else:
+            ok, boxes = trackers.update(frame)
+            boxes_to_draw = []
+            for idx, good in enumerate(ok):
+                if not good: continue
+                x,y,w,h = boxes[idx]
+                _id, lbl = tracking_ids[idx]
+                boxes_to_draw.append((int(x), int(y), int(x+w), int(y+h), lbl, None))
+
+            # 중간 재감지로 신규 객체 추가 (옵션)
+            if frame_count % REDTECT_INTERVAL == 0:
+                with torch.no_grad():
+                    results2 = model(frame, size=target_size)
+                for *box, conf, cls in results2.xyxy[0]:
+                    if float(conf) < DETECT_CONF_THRESH: continue
+                    lbl = results2.names[int(cls)]
+                    if lbl not in label_map: continue
+                    x1,y1,x2,y2 = map(int, box)
+                    trk = cv2.legacy.TrackerCSRT_create()
+                    trackers.add(trk, frame, (x1,y1,x2-x1,y2-y1))
+                    tracking_ids.append((next_id, lbl))
+                    boxes_to_draw.append((x1, y1, x2, y2, lbl, float(conf)))
+                    next_id += 1
+
+        # 시각화
+        for x1,y1,x2,y2,lbl,conf in boxes_to_draw:
+            color = (255,0,0) if lbl=='person' else (0,0,255)
+            cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
+            text = f"{label_map[lbl]} {conf*100:.1f}%" if conf else label_map[lbl]
+            cv2.putText(frame, text, (x1, y1-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+        # JPEG 인코딩 & 큐
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-        data = buf.tobytes()
-        if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
-        frame_queue.put(data)
+        if not frame_queue.empty(): frame_queue.get_nowait()
+        frame_queue.put(buf.tobytes())
 
-        # 4) FPS 유지
         elapsed = time.time() - start
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
@@ -179,47 +247,33 @@ def generate():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-def get_network_signal(interface='wlan0'):
-    try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except Exception:
-        return None
-
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
+        'Cache-Control':'no-cache, no-store, must-revalidate',
+        'Pragma':'no-cache', 'Expires':'0'
     })
     return resp
 
 @app.route('/stats')
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
+    mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
-        pass
-    sig = get_network_signal('wlan0')
-    return jsonify(
-        camera=1,
-        cpu_percent=cpu,
-        memory_percent=mem.percent,
-        temperature_c=temp,
-        wifi_signal_dbm=sig
-    )
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except: pass
+    try:
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
+        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
+    except: sig = None
+    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem,
+                   temperature_c=temp, wifi_signal_dbm=sig)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
