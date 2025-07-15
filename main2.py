@@ -14,19 +14,43 @@ except ImportError:
 # 카메라 초기화
 if has_picam:
     picam2 = Picamera2()
-    config = picam2.create_video_configuration(main={"size": (1280, 720)})
+    # 비디오 설정: 1280x720, raw RGB
+    config = picam2.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
     picam2.configure(config)
-    # 먼저 프리뷰 시도
+
+    # --- 화이트밸런스 설정 예시 ---
+    # 1) 자동 AWB 사용
+    picam2.set_controls({"AwbEnable": 1})
+
+    # 또는 2) 수동 AWB (측정 후 알맞은 게인을 넣어 보세요)
+    # 예를 들어, R 게인은 1.4, B 게인은 1.2 정도로 시작해 보시고,
+    # 실제 환경에 맞게 조금씩 조정하세요.
+    # picam2.set_controls({
+    #     "AwbEnable": 0,
+    #     "ColourGains": (1.4, 1.2)
+    # })
+
+    # DRM 프리뷰(선택)
     try:
         picam2.start_preview(Preview.DRM)
     except RuntimeError:
-        # 이미 이벤트 루프가 실행 중이면 무시
         pass
+
     picam2.start()
+
 else:
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # --- OpenCV 쪽 화이트밸런스 설정 ---
+    # 1) 자동 화이트밸런스 켜기
+    cap.set(cv2.CAP_PROP_AUTO_WB, 1)
+
+    # 또는 2) 수동 화이트밸런스(색온도) 설정
+    # cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+    # cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4500)  # 4500K 정도로 시작
+
     if not cap.isOpened():
         raise RuntimeError('카메라를 시작할 수 없습니다.')
 
