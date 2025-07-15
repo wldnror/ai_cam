@@ -21,8 +21,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+# ----------------------------------------
+# 0) 한글 폰트 설치 확인 및 로드
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
 if not os.path.exists(FONT_PATH):
     try:
@@ -37,7 +37,7 @@ except Exception:
     font = ImageFont.load_default()
     print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 1) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
@@ -47,7 +47,7 @@ try:
 except Exception:
     pass
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 2) PyTorch 스레드 수 & YOLOv5 모델 로드
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
@@ -83,11 +83,10 @@ def load_model(weights_name):
 # 시작 시 모델 로드
 load_model(MODEL_NAME)
 
-# ──────────────────────────────────────────────────────────────────────────────
 # 한글 레이블 매핑
 label_map = {'person': '사람', 'car': '자동차'}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 3) 카메라 클래스 정의
 class CSICamera:
     def __init__(self):
@@ -98,7 +97,8 @@ class CSICamera:
         )
         self.picam2.configure(cfg)
         self.picam2.start()
-        for _ in range(3): self.picam2.capture_array("main")
+        for _ in range(3):
+            self.picam2.capture_array("main")
 
     def read(self):
         rgb = self.picam2.capture_array("main")
@@ -115,54 +115,90 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
-                for _ in range(5): cap.read()
-                self.cap = cap; break
+                for _ in range(5):
+                    cap.read()
+                self.cap = cap
+                break
         if not self.cap:
             raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
-    def read(self): return self.cap.read()
+
+    def read(self):
+        return self.cap.read()
 
 try:
-    camera = CSICamera(); print(">>> Using CSI camera module")
+    camera = CSICamera()
+    print(">>> Using CSI camera module")
 except Exception as e:
     print(f"[ERROR] CSI init failed: {e}")
-    camera = USBCamera(); print(">>> Using USB webcam")
+    camera = USBCamera()
+    print(">>> Using USB webcam")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4) 프레임 처리 (동기식 파이프라인)
+# ----------------------------------------
+# 4) 프레임 처리 (동기식 파이프라인) 및 FPS 계산
 frame_queue = queue.Queue(maxsize=3)
+current_fps = 0.0
+fps_lock = threading.Lock()
 
 def capture_and_process():
-    fps = 60; interval = 1.0 / fps; target_size = 700
+    global current_fps
+    fps = 60
+    interval = 1.0 / fps
+    target_size = 700
+
     while True:
         start = time.time()
         ret, frame = camera.read()
-        if not ret: continue
-        # 항상 동일 모델 사용
+        if not ret:
+            continue
+
+        # 객체 검출
         with torch.no_grad():
             results = model(frame, size=target_size)
+
+        # 검출된 박스 수집
         boxes = []
         for *box, conf, cls in results.xyxy[0]:
             label = results.names[int(cls)]
-            if label not in label_map: continue
+            if label not in label_map:
+                continue
             x1, y1, x2, y2 = map(int, box)
             boxes.append((x1, y1, x2, y2, label, float(conf)))
+
+        # 박스 그리기
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # 텍스트 오버레이
         img_pil = Image.fromarray(frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
         for x1, y1, x2, y2, label, conf in boxes:
-            text = f"{label_map[label]} {conf*100:.1f}%"; size = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
+            text = f"{label_map[label]} {conf*100:.1f}%"
+            size = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0, 0, 0))
+            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-        if not frame_queue.empty(): frame_queue.get_nowait()
+
+        # 큐 관리
+        if not frame_queue.empty():
+            frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
-        elapsed = time.time() - start; time.sleep(max(0, interval - elapsed))
+
+        # FPS 계산 및 저장
+        elapsed = time.time() - start
+        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+        with fps_lock:
+            current_fps = instant_fps
+
+        # 주기 조절
+        time.sleep(max(0, interval - elapsed))
+
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
@@ -204,7 +240,18 @@ def stats():
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
     except Exception:
         sig = None
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig)
+
+    with fps_lock:
+        fps = round(current_fps, 1)
+
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem,
+        temperature_c=temp,
+        wifi_signal_dbm=sig,
+        fps=fps
+    )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
