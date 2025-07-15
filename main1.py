@@ -61,13 +61,11 @@ from utils.torch_utils import select_device
 
 device = select_device('cpu')
 
-# 단일 모델 로드 설정: 온도 기반 스위치 기능 제거
 MODEL_NAME = "yolov5n.pt"
 backend = None
 model = None
 
 def load_model(weights_name):
-    """주어진 가중치 파일로 모델 로드"""
     global backend, model
     weights_path = os.path.join(YOLOROOT, weights_name)
     if not os.path.exists(weights_path):
@@ -80,7 +78,6 @@ def load_model(weights_name):
     model = AutoShape(backend.model)
     print(f"[MODEL] Loaded {weights_name}")
 
-# 시작 시 모델 로드
 load_model(MODEL_NAME)
 
 # 한글 레이블 매핑
@@ -134,13 +131,20 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 프레임 처리 (동기식 파이프라인) 및 FPS 계산
+# 4) 프레임 처리 (검출+추적) 및 FPS 계산
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
 
+# 트래킹용 전역 변수
+trackers = None
+tracked_labels = []
+frame_count = 0
+detect_interval = 5  # N 프레임마다 검출
+
 def capture_and_process():
-    global current_fps
+    global current_fps, trackers, tracked_labels, frame_count
+
     fps = 10
     interval = 1.0 / fps
     target_size = 270
@@ -151,66 +155,78 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 객체 검출
-        with torch.no_grad():
-            results = model(frame, size=target_size)
+        frame_count += 1
+        detections_to_draw = []
 
-        # 검출된 박스 수집
-        boxes = []
-        for *box, conf, cls in results.xyxy[0]:
-            label = results.names[int(cls)]
-            if label not in label_map:
-                continue
-            x1, y1, x2, y2 = map(int, box)
-            boxes.append((x1, y1, x2, y2, label, float(conf)))
+        if frame_count % detect_interval == 0:
+            # --- 1) YOLO 검출 ---
+            with torch.no_grad():
+                results = model(frame, size=target_size)
 
-        # 박스 그리기
-        for x1, y1, x2, y2, label, conf in boxes:
-            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
+            dets = []
+            for *box, conf, cls in results.xyxy[0]:
+                lbl = results.names[int(cls)]
+                if lbl not in label_map:
+                    continue
+                x1, y1, x2, y2 = map(int, box)
+                w, h = x2 - x1, y2 - y1
+                dets.append((x1, y1, w, h, label_map[lbl], float(conf)))
+
+            # --- 2) Tracker 초기화 ---
+            trackers = cv2.MultiTracker_create()
+            tracked_labels = []
+            for x, y, w, h, lbl, conf in dets:
+                tr = cv2.TrackerCSRT_create()
+                trackers.add(tr, frame, (x, y, w, h))
+                tracked_labels.append(lbl)
+                detections_to_draw.append((x, y, x+w, y+h, lbl, conf))
+        else:
+            # --- 3) Tracker 업데이트 ---
+            if trackers is not None:
+                ok, boxes = trackers.update(frame)
+                for (box, lbl) in zip(boxes, tracked_labels):
+                    x, y, w, h = map(int, box)
+                    detections_to_draw.append((x, y, x+w, y+h, lbl, None))
+
+        # --- 4) 박스 & 텍스트 그리기 ---
+        for x1, y1, x2, y2, lbl, conf in detections_to_draw:
+            color = (255, 0, 0) if lbl == '사람' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # 텍스트 오버레이
         img_pil = Image.fromarray(frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
-        for x1, y1, x2, y2, label, conf in boxes:
-            text = f"{label_map[label]} {conf*100:.1f}%"
+        for x1, y1, x2, y2, lbl, conf in detections_to_draw:
+            text = lbl if conf is None else f"{lbl} {conf*100:.1f}%"
             size = draw.textsize(text, font=font)
             draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0, 0, 0))
             draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # JPEG 인코딩
+        # JPEG 인코딩 & 큐
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-
-        # 큐 관리
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # FPS 계산 및 저장
+        # FPS 계산
         elapsed = time.time() - start
-        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+        instant_fps = 1.0/elapsed if elapsed>0 else 0.0
         with fps_lock:
             current_fps = instant_fps
 
-        # 주기 조절
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ----------------------------------------
-# 5) Flask 앱 및 엔드포인트
+# 5) Flask 앱 및 엔드포인트 (이하 동일)
 app = Flask(__name__)
 
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n'
-            + frame +
-            b'\r\n'
-        )
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
 def index():
@@ -218,12 +234,10 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    })
+    resp = Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate',
+                         'Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
@@ -232,26 +246,20 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
         pass
     try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig','wlan0'],
+                                      stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except Exception:
+    except:
         sig = None
-
     with fps_lock:
         fps = round(current_fps, 1)
-
-    return jsonify(
-        camera=1,
-        cpu_percent=cpu,
-        memory_percent=mem,
-        temperature_c=temp,
-        wifi_signal_dbm=sig,
-        fps=fps
-    )
+    return jsonify(camera=1, cpu_percent=cpu,
+                   memory_percent=mem, temperature_c=temp,
+                   wifi_signal_dbm=sig, fps=fps)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
