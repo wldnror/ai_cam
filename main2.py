@@ -30,7 +30,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 수동 로드 (torch.hub 대신 로컬 .pt 사용)
+# 1) YOLOv5 모델 수동 로드 (로컬 .pt 또는 torch.hub fallback)
 WEIGHTS = os.path.join(os.path.dirname(__file__), 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
     print(f"Downloading yolov5n.pt to {WEIGHTS}...")
@@ -39,7 +39,6 @@ if not os.path.exists(WEIGHTS):
         WEIGHTS
     )
 
-# ultralytics/yolov5 레포를 ~/yolov5 에 클론해두었다면 로컬 로드
 YOLOROOT = os.path.expanduser('~/yolov5')
 if os.path.isdir(YOLOROOT):
     import sys
@@ -51,7 +50,6 @@ if os.path.isdir(YOLOROOT):
     model = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
     model.model.eval()
 else:
-    # 레포 없다면 torch.hub fallback (force_reload 옵션 유지)
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     model = torch.hub.load(
@@ -60,7 +58,7 @@ else:
     model.eval()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 인터페이스 정의
+# 2) 카메라 인터페이스 클래스 정의
 class CSICamera:
     """Raspberry Pi CSI 카메라 모듈을 Picamera2로 제어"""
     def __init__(self):
@@ -99,7 +97,6 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# CSI 우선, USB 대체 (예외 메시지 출력 추가)
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -113,10 +110,10 @@ except Exception as e:
 frame_queue = queue.Queue(maxsize=1)
 
 def capture_and_process():
-    fps = 10                          # OPT ▶︎ FPS 조정
+    fps = 10
     interval = 1.0 / fps
-    target_size = (320, 320)          # OPT ▶︎ 해상도 조정
-    skip_interval = 2                 # OPT ▶︎ 프레임 스킵
+    target_size = (320, 320)
+    skip_interval = 2
     frame_count = 0
     last = time.time()
     last_results = None
@@ -134,36 +131,32 @@ def capture_and_process():
 
         frame_count += 1
         if frame_count % skip_interval == 0:
-            with torch.no_grad():     # OPT ▶︎ no_grad()
+            with torch.no_grad():
                 small = cv2.resize(frame, target_size)
                 last_results = model(small)
 
         if last_results is None:
             continue
 
-        # 박스 그리기
         h_ratio = frame.shape[0] / target_size[1]
         w_ratio = frame.shape[1] / target_size[0]
         for *box, conf, cls in last_results.xyxy[0]:
-            x1, y1, x2, y2 = map
-                int, (
-                    box[0] * w_ratio, 
-                    box[1] * h_ratio,
-                    box[2] * w_ratio,
-                    box[3] * h_ratio
-                )
+            x1, y1, x2, y2 = map(int, (
+                box[0] * w_ratio,
+                box[1] * h_ratio,
+                box[2] * w_ratio,
+                box[3] * h_ratio
+            ))
             label = last_results.names[int(cls)]
             if label in ('person', 'car'):
-                color = (0,0,255) if label=='person' else (255,0,0)
+                color = (0, 0, 255) if label == 'person' else (255, 0, 0)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, label, (x1, y1-10),
+                cv2.putText(frame, label, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         data = buf.tobytes()
 
-        # 큐에 최신 프레임만 유지
         if not frame_queue.empty():
             try:
                 frame_queue.get_nowait()
