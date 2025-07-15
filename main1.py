@@ -15,12 +15,6 @@ import threading
 import queue
 import subprocess
 import cv2
-# legacy TrackerCSRT 생성 함수 지원
-if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
-    TrackerCSRT = cv2.legacy.TrackerCSRT_create
-else:
-    TrackerCSRT = cv2.TrackerCSRT_create
-
 import torch
 import psutil
 import numpy as np
@@ -136,19 +130,42 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 프레임 처리 (검출+추적) 및 FPS 계산
+# 4) 트래커 생성 함수 탐색
+# CSRT 우선, 없으면 KCF 사용, legacy fallback 포함
+
+def _find_tracker_ctor():
+    names = [
+        'TrackerCSRT_create',
+        'legacy.TrackerCSRT_create',
+        'TrackerKCF_create',
+        'legacy.TrackerKCF_create'
+    ]
+    for name in names:
+        parts = name.split('.')
+        mod = cv2
+        for p in parts[:-1]:
+            mod = getattr(mod, p, None)
+            if mod is None:
+                break
+        if mod and hasattr(mod, parts[-1]):
+            return getattr(mod, parts[-1])
+    return None
+
+TrackerCreate = _find_tracker_ctor()
+if TrackerCreate is None:
+    raise ImportError("No compatible tracker found (CSRT/KCF) in cv2 namespace.")
+
+# ----------------------------------------
+# 5) 프레임 처리 (검출+추적) 및 FPS 계산
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
-
-# 트래킹용 전역 변수
 trackers = []          # [(tracker, label), ...]
 frame_count = 0
 detect_interval = 5    # N 프레임마다 검출
 
 def capture_and_process():
     global current_fps, trackers, frame_count
-
     fps = 10
     interval = 1.0 / fps
     target_size = 270
@@ -163,10 +180,9 @@ def capture_and_process():
         detections_to_draw = []
 
         if frame_count % detect_interval == 0:
-            # —— 1) YOLO 검출 —— 
+            # 검출 단계
             with torch.no_grad():
                 results = model(frame, size=target_size)
-
             dets = []
             for *box, conf, cls in results.xyxy[0]:
                 lbl0 = results.names[int(cls)]
@@ -176,40 +192,39 @@ def capture_and_process():
                 w, h = x2 - x1, y2 - y1
                 dets.append((x1, y1, w, h, label_map[lbl0], float(conf)))
 
-            # —— 2) 트래커 초기화 —— 
+            # 트래커 초기화
             trackers = []
             for x, y, w, h, lbl, conf in dets:
-                tr = TrackerCSRT()
+                tr = TrackerCreate()
                 tr.init(frame, (x, y, w, h))
                 trackers.append((tr, lbl))
-                detections_to_draw.append((x, y, x + w, y + h, lbl, conf))
+                detections_to_draw.append((x, y, x+w, y+h, lbl, conf))
         else:
-            # —— 3) 트래커 업데이트 —— 
+            # 추적 단계
             new_trackers = []
             for tr, lbl in trackers:
                 ok, box = tr.update(frame)
                 if not ok:
                     continue
                 x, y, w, h = map(int, box)
-                detections_to_draw.append((x, y, x + w, y + h, lbl, None))
+                detections_to_draw.append((x, y, x+w, y+h, lbl, None))
                 new_trackers.append((tr, lbl))
             trackers = new_trackers
 
-        # —— 4) 박스 & 텍스트 그리기 —— 
+        # 박스 및 텍스트 그리기
         for x1, y1, x2, y2, lbl, conf in detections_to_draw:
             color = (255, 0, 0) if lbl == '사람' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
         img_pil = Image.fromarray(frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
         for x1, y1, x2, y2, lbl, conf in detections_to_draw:
-            txt = lbl if conf is None else f"{lbl} {conf*100:.1f}%"
-            sz = draw.textsize(txt, font=font)
-            draw.rectangle([x1, y1 - sz[1] - 4, x1 + sz[0] + 4, y1], fill=(0, 0, 0))
-            draw.text((x1 + 2, y1 - sz[1] - 2), txt, font=font, fill=(255, 255, 255))
+            text = lbl if conf is None else f"{lbl} {conf*100:.1f}%"
+            sz = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-sz[1]-4, x1+sz[0]+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-sz[1]-2), text, font=font, fill=(255,255,255))
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # JPEG 인코딩 & 큐 삽입
+        # JPEG 인코딩 및 큐 삽입
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
@@ -218,25 +233,19 @@ def capture_and_process():
         # FPS 계산
         elapsed = time.time() - start
         with fps_lock:
-            current_fps = 1.0 / elapsed if elapsed > 0 else 0.0
-
+            current_fps = 1.0/elapsed if elapsed>0 else 0.0
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ----------------------------------------
-# 5) Flask 앱 및 엔드포인트
+# 6) Flask 앱 및 엔드포인트 설정
 app = Flask(__name__)
 
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n'
-            + frame +
-            b'\r\n'
-        )
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
 def index():
@@ -255,7 +264,7 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
     except:
         pass
     try:
@@ -264,10 +273,9 @@ def stats():
     except:
         sig = None
     with fps_lock:
-        fps = round(current_fps, 1)
-    return jsonify(camera=1, cpu_percent=cpu,
-                   memory_percent=mem, temperature_c=temp,
-                   wifi_signal_dbm=sig, fps=fps)
+        fps = round(current_fps,1)
+    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem,
+                   temperature_c=temp, wifi_signal_dbm=sig, fps=fps)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
