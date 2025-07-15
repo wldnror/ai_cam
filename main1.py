@@ -141,9 +141,9 @@ fps_lock = threading.Lock()
 
 def capture_and_process():
     global current_fps
-    fps = 20
+    fps = 30
     interval = 1.0 / fps
-    target_size = 300
+    target_size = 230
 
     while True:
         start = time.time()
