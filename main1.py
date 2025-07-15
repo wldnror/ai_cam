@@ -63,7 +63,7 @@ device = select_device('cpu')
 
 # 모델 전환 설정
 MODEL_CONFIGS = [
-    {"name": "yolov5m.pt", "threshold_max": 50},   # 65℃ 이하 -> yolov5m
+    {"name": "yolov5n.pt", "threshold_max": 50},   # 65℃ 이하 -> yolov5m
     {"name": "yolov5n.pt", "threshold_max": 100},  # 65℃ 초과 -> yolov5n
 ]
 CURRENT_MODEL = None
