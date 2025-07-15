@@ -22,20 +22,20 @@ from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+# 0) 한글 폰트 설치/로드
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
 if not os.path.exists(FONT_PATH):
     try:
-        print("한글 폰트가 없어 설치를 시도합니다...")
-        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
-        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+        print("한글 폰트가 없어 설치 시도...")
+        subprocess.run(['sudo','apt-get','update'], check=True)
+        subprocess.run(['sudo','apt-get','install','-y','fonts-nanum'], check=True)
     except Exception as e:
         print(f"폰트 설치 실패: {e}")
 try:
     font = ImageFont.truetype(FONT_PATH, 24)
-except Exception:
+except:
     font = ImageFont.load_default()
-    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
+    print("한글 폰트 로드 실패, 기본 폰트 사용")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) 화면 절전/DPMS 비활성화
@@ -43,49 +43,48 @@ try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
         os.system('xset s off; xset s noblank; xset -dpms')
-        print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
-except Exception:
+        print("화면 절전 및 DPMS 비활성화 완료")
+except:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) PyTorch 스레드 수 & YOLOv5 모델 로드 (동적 전환)
+# 2) PyTorch 스레드 & YOLOv5 모델 로드 (온도별 전환)
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
 
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
-    subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
+    subprocess.run(['git','clone','https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-
 MODEL_CONFIGS = [
-    {"name": "yolov5m.pt", "threshold_max": 65},
-    {"name": "yolov5n.pt", "threshold_max": 100},
+    {"name":"yolov5m.pt","threshold_max":65},
+    {"name":"yolov5n.pt","threshold_max":100},
 ]
 CURRENT_MODEL = None
 LAST_SWITCH = 0
-SWITCH_INTERVAL = 10  # 초
+SWITCH_INTERVAL = 10
 
-def load_model(weights_name):
+def load_model(weights):
     global backend, model, CURRENT_MODEL
-    path = os.path.join(YOLOROOT, weights_name)
+    path = os.path.join(YOLOROOT, weights)
     if not os.path.exists(path):
         torch.hub.download_url_to_file(
-            f'https://github.com/ultralytics/yolov5/releases/download/v7.0/{weights_name}',
+            f'https://github.com/ultralytics/yolov5/releases/download/v7.0/{weights}',
             path
         )
     backend = DetectMultiBackend(path, device=device, fuse=True)
     backend.model.eval()
     model = AutoShape(backend.model)
-    CURRENT_MODEL = weights_name
-    print(f"[MODEL] Loaded {weights_name}")
+    CURRENT_MODEL = weights
+    print(f"[MODEL] Loaded {weights}")
 
 def get_cpu_temp():
     try:
-        return float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+        return float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
     except:
         return None
 
@@ -104,7 +103,7 @@ def maybe_switch_model():
 load_model(MODEL_CONFIGS[0]['name'])
 
 # ──────────────────────────────────────────────────────────────────────────────
-label_map = {'person': '사람', 'car': '자동차'}
+label_map = {'person':'사람','car':'자동차'}
 
 # ──────────────────────────────────────────────────────────────────────────────
 class CSICamera:
@@ -112,8 +111,8 @@ class CSICamera:
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)},
-            lores={"size": (640, 360)},
+            main={"size":(1280,720)},
+            lores={"size":(640,360)},
             buffer_count=6
         )
         self.picam2.configure(cfg)
@@ -130,10 +129,10 @@ class USBCamera:
         for i in range(5):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
+                cap.set(cv2.CAP_PROP_FOURCC,cv2.VideoWriter_fourcc(*'MJPG'))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT,720)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE,4)
                 for _ in range(5): cap.read()
                 self.cap = cap; break
         if not self.cap:
@@ -150,33 +149,35 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────────────────────
 frame_queue = queue.Queue(maxsize=3)
 
-# trackers 리스트로 직접 관리
-trackers = []  # (tracker, id, label, conf)
+# 추적(Tracking) 준비
+# 가능한 Tracker 생성 함수 찾기
+Tracker_create = None
+for name in ("CSRT","KCF","MOSSE"):
+    f = f"Tracker{name}_create"
+    if hasattr(cv2, f):
+        Tracker_create = getattr(cv2, f)
+        print(f"Using cv2.{f}")
+        break
+    elif hasattr(cv2, "legacy") and hasattr(cv2.legacy, f):
+        Tracker_create = getattr(cv2.legacy, f)
+        print(f"Using cv2.legacy.{f}")
+        break
+
+use_tracking = Tracker_create is not None
+if not use_tracking:
+    print("경고: Tracker가 없어 매 프레임 감지-only 모드로 동작합니다.")
+
+trackers = []      # (tracker, id, label, conf)
 next_id = 0
 REDTECT_INTERVAL = 30
 frame_count = 0
 DETECT_CONF_THRESH = 0.4
 
-# 가능한 Tracker 생성 함수 찾기 (CSRT, KCF, MOSSE 순)
-Tracker_create = None
-for t in ('CSRT', 'KCF', 'MOSSE'):
-    func = f'Tracker{t}_create'
-    if hasattr(cv2, func):
-        Tracker_create = getattr(cv2, func)
-        print(f"Using cv2.{func}")
-        break
-    elif hasattr(cv2, 'legacy') and hasattr(cv2.legacy, func):
-        Tracker_create = getattr(cv2.legacy, func)
-        print(f"Using cv2.legacy.{func}")
-        break
-if Tracker_create is None:
-    raise RuntimeError("이 OpenCV 빌드에 사용 가능한 Tracker가 없습니다.")
-
 def capture_and_process():
     global trackers, next_id, frame_count
 
     fps = 15
-    interval = 1.0 / fps
+    interval = 1.0/fps
     target_size = 320
 
     while True:
@@ -187,8 +188,12 @@ def capture_and_process():
 
         maybe_switch_model()
 
-        # 재감지 시점
-        if frame_count % REDTECT_INTERVAL == 1 or not trackers:
+        # -- 감지 or 추적 결정 --
+        do_detect = (not use_tracking) or (frame_count % REDTECT_INTERVAL == 1) or (not trackers)
+
+        boxes_to_draw = []
+        if do_detect:
+            # YOLO 감지
             with torch.no_grad():
                 results = model(frame, size=target_size)
             dets = []
@@ -197,103 +202,92 @@ def capture_and_process():
                 lbl = results.names[int(cls)]
                 if lbl not in label_map: continue
                 x1,y1,x2,y2 = map(int, box)
-                dets.append((x1, y1, x2-x1, y2-y1, lbl, float(conf)))
+                dets.append((x1,y1,x2-x1,y2-y1,lbl,float(conf)))
 
-            # trackers 초기화
-            trackers = []
-            for x,y,w,h,lbl,conf in dets:
-                trk = Tracker_create()
-                trk.init(frame, (x, y, w, h))
-                trackers.append((trk, next_id, lbl, conf))
-                next_id += 1
+            # Tracker 초기화
+            if use_tracking:
+                trackers = []
+                for x,y,w,h,lbl,conf in dets:
+                    trk = Tracker_create()
+                    trk.init(frame,(x,y,w,h))
+                    trackers.append((trk, next_id, lbl, conf))
+                    next_id += 1
 
-            boxes_to_draw = [(x, y, x+w, y+h, lbl, conf) for x,y,w,h,lbl,conf in dets]
+            boxes_to_draw = [(x,y,x+w,y+h,lbl,conf) for x,y,w,h,lbl,conf in dets]
 
         else:
-            new_trackers = []
-            boxes_to_draw = []
             # 추적 단계
-            for trk, tid, lbl, old_conf in trackers:
+            new_trk = []
+            for trk, tid, lbl, _ in trackers:
                 ok, box = trk.update(frame)
-                if not ok:
-                    continue
+                if not ok: continue
                 x,y,w,h = map(int, box)
-                new_trackers.append((trk, tid, lbl, None))
-                boxes_to_draw.append((x, y, x+w, y+h, lbl, None))
-            trackers = new_trackers
+                new_trk.append((trk, tid, lbl, None))
+                boxes_to_draw.append((x,y,x+w,y+h,lbl,None))
+            trackers[:] = new_trk
 
-            # 중간 재감지로 신규 객체 추가 (옵션)
-            if frame_count % REDTECT_INTERVAL == 0:
+            # 중간 재감지 (옵션)
+            if use_tracking and frame_count % REDTECT_INTERVAL == 0:
                 with torch.no_grad():
-                    results2 = model(frame, size=target_size)
-                for *box, conf, cls in results2.xyxy[0]:
+                    r2 = model(frame, size=target_size)
+                for *box, conf, cls in r2.xyxy[0]:
                     if float(conf) < DETECT_CONF_THRESH: continue
                     lbl = results.names[int(cls)]
                     if lbl not in label_map: continue
                     x1,y1,x2,y2 = map(int, box)
                     trk = Tracker_create()
-                    trk.init(frame, (x1, y1, x2-x1, y2-y1))
+                    trk.init(frame,(x1,y1,x2-x1,y2-y1))
                     trackers.append((trk, next_id, lbl, float(conf)))
-                    boxes_to_draw.append((x1, y1, x2, y2, lbl, float(conf)))
+                    boxes_to_draw.append((x1,y1,x2,y2,lbl,float(conf)))
                     next_id += 1
 
-        # 시각화
+        # -- 시각화 --
         for x1,y1,x2,y2,lbl,conf in boxes_to_draw:
             color = (255,0,0) if lbl=='person' else (0,0,255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            text = f"{label_map[lbl]} {conf*100:.1f}%" if conf else label_map[lbl]
-            cv2.putText(frame, text, (x1, y1-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+            cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
+            txt = f"{label_map[lbl]} {conf*100:.1f}%" if conf else label_map[lbl]
+            cv2.putText(frame,txt,(x1,y1-10),
+                        cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,255),2)
 
         # JPEG 인코딩 & 큐 업로드
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY),60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        elapsed = time.time() - start
-        time.sleep(max(0, interval - elapsed))
+        elapsed = time.time()-start
+        time.sleep(max(0, interval-elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-
 def generate():
     while True:
-        frame = frame_queue.get()
+        f = frame_queue.get()
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n'+f+b'\r\n')
 
 @app.route('/')
-def index():
-    return render_template('index.html')
-
+def index(): return render_template('index.html')
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache', 'Expires': '0'
-    })
+    resp.headers.update({'Cache-Control':'no-cache','Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
 def stats():
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory().percent
-    temp = None
+    c = psutil.cpu_percent(interval=0.5)
+    m = psutil.virtual_memory().percent
+    t = None
+    try: t = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except: pass
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except:
-        pass
-    try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
-        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except:
-        sig = None
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem,
-                   temperature_c=temp, wifi_signal_dbm=sig)
+        out = subprocess.check_output(['iwconfig','wlan0'],stderr=subprocess.DEVNULL).decode()
+        w = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
+    except: w=None
+    return jsonify(camera=1, cpu_percent=c, memory_percent=m, temperature_c=t, wifi_signal_dbm=w)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=5000)
