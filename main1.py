@@ -153,90 +153,10 @@ def _find_tracker_ctor():
 
 TrackerCreate = _find_tracker_ctor()
 if TrackerCreate is None:
-    raise ImportError("No compatible tracker found (CSRT/KCF) in cv2 namespace.")
-
-# ----------------------------------------
-# 5) 프레임 처리 (검출+추적) 및 FPS 계산
-frame_queue = queue.Queue(maxsize=3)
-current_fps = 0.0
-fps_lock = threading.Lock()
-trackers = []          # [(tracker, label), ...]
-frame_count = 0
-detect_interval = 5    # N 프레임마다 검출
-
-def capture_and_process():
-    global current_fps, trackers, frame_count
-    fps = 10
-    interval = 1.0 / fps
-    target_size = 270
-
-    while True:
-        start = time.time()
-        ret, frame = camera.read()
-        if not ret:
-            continue
-
-        frame_count += 1
-        detections_to_draw = []
-
-        if frame_count % detect_interval == 0:
-            # 검출 단계
-            with torch.no_grad():
-                results = model(frame, size=target_size)
-            dets = []
-            for *box, conf, cls in results.xyxy[0]:
-                lbl0 = results.names[int(cls)]
-                if lbl0 not in label_map:
-                    continue
-                x1, y1, x2, y2 = map(int, box)
-                w, h = x2 - x1, y2 - y1
-                dets.append((x1, y1, w, h, label_map[lbl0], float(conf)))
-
-            # 트래커 초기화
-            trackers = []
-            for x, y, w, h, lbl, conf in dets:
-                tr = TrackerCreate()
-                tr.init(frame, (x, y, w, h))
-                trackers.append((tr, lbl))
-                detections_to_draw.append((x, y, x+w, y+h, lbl, conf))
-        else:
-            # 추적 단계
-            new_trackers = []
-            for tr, lbl in trackers:
-                ok, box = tr.update(frame)
-                if not ok:
-                    continue
-                x, y, w, h = map(int, box)
-                detections_to_draw.append((x, y, x+w, y+h, lbl, None))
-                new_trackers.append((tr, lbl))
-            trackers = new_trackers
-
-        # 박스 및 텍스트 그리기
-        for x1, y1, x2, y2, lbl, conf in detections_to_draw:
-            color = (255, 0, 0) if lbl == '사람' else (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        img_pil = Image.fromarray(frame[:, :, ::-1])
-        draw = ImageDraw.Draw(img_pil)
-        for x1, y1, x2, y2, lbl, conf in detections_to_draw:
-            text = lbl if conf is None else f"{lbl} {conf*100:.1f}%"
-            sz = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-sz[1]-4, x1+sz[0]+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-sz[1]-2), text, font=font, fill=(255,255,255))
-        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-
-        # JPEG 인코딩 및 큐 삽입
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-        if not frame_queue.empty():
-            frame_queue.get_nowait()
-        frame_queue.put(buf.tobytes())
-
-        # FPS 계산
-        elapsed = time.time() - start
-        with fps_lock:
-            current_fps = 1.0/elapsed if elapsed>0 else 0.0
-        time.sleep(max(0, interval - elapsed))
-
-threading.Thread(target=capture_and_process, daemon=True).start()
+    print("[WARN] Compatible tracker not found. Tracking disabled; 매 프레임 YOLO로만 검출합니다.")
+    TRACKING_ENABLED = False
+else:
+    TRACKING_ENABLED = True
 
 # ----------------------------------------
 # 6) Flask 앱 및 엔드포인트 설정
