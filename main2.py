@@ -48,7 +48,7 @@ except:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) PyTorch 스레드 & YOLOv5 모델 로드 (온도별 전환)
+# 2) PyTorch 스레드 & YOLOv5 모델 로드 (단일 모델)
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
 
@@ -60,16 +60,10 @@ from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-MODEL_CONFIGS = [
-    {"name":"yolov5m.pt","threshold_max":65},
-    {"name":"yolov5n.pt","threshold_max":100},
-]
-CURRENT_MODEL = None
-LAST_SWITCH = 0
-SWITCH_INTERVAL = 10
 
+# 단일 모델 로드 함수
 def load_model(weights):
-    global backend, model, CURRENT_MODEL
+    global backend, model
     path = os.path.join(YOLOROOT, weights)
     if not os.path.exists(path):
         torch.hub.download_url_to_file(
@@ -79,28 +73,10 @@ def load_model(weights):
     backend = DetectMultiBackend(path, device=device, fuse=True)
     backend.model.eval()
     model = AutoShape(backend.model)
-    CURRENT_MODEL = weights
     print(f"[MODEL] Loaded {weights}")
 
-def get_cpu_temp():
-    try:
-        return float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except:
-        return None
-
-def maybe_switch_model():
-    global LAST_SWITCH
-    now = time.time()
-    if now - LAST_SWITCH < SWITCH_INTERVAL: return
-    LAST_SWITCH = now
-    temp = get_cpu_temp()
-    if temp is None: return
-    for cfg in MODEL_CONFIGS:
-        if temp <= cfg['threshold_max'] and cfg['name'] != CURRENT_MODEL:
-            load_model(cfg['name'])
-            break
-
-load_model(MODEL_CONFIGS[0]['name'])
+# 원하는 가중치 파일만 로드 (예: yolov5m.pt)
+load_model("yolov5m.pt")
 
 # ──────────────────────────────────────────────────────────────────────────────
 label_map = {'person':'사람','car':'자동차'}
@@ -146,11 +122,9 @@ except Exception as e:
     print(f"[ERROR] CSI init failed: {e}")
     camera = USBCamera(); print(">>> USB camera")
 
-# ──────────────────────────────────────────────────────────────────────────────
 frame_queue = queue.Queue(maxsize=3)
 
 # 추적(Tracking) 준비
-# 가능한 Tracker 생성 함수 찾기
 Tracker_create = None
 for name in ("CSRT","KCF","MOSSE"):
     f = f"Tracker{name}_create"
@@ -185,8 +159,6 @@ def capture_and_process():
         ret, frame = camera.read()
         if not ret: continue
         frame_count += 1
-
-        maybe_switch_model()
 
         # -- 감지 or 추적 결정 --
         do_detect = (not use_tracking) or (frame_count % REDTECT_INTERVAL == 1) or (not trackers)
