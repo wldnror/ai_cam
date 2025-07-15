@@ -151,19 +151,26 @@ except Exception as e:
 frame_queue = queue.Queue(maxsize=3)
 
 # trackers 리스트로 직접 관리
-trackers = []  # (tracker, id, label)
+trackers = []  # (tracker, id, label, conf)
 next_id = 0
 REDTECT_INTERVAL = 30
 frame_count = 0
 DETECT_CONF_THRESH = 0.4
 
-# TrackerCSRT 생성 함수 결정
-if hasattr(cv2, 'TrackerCSRT_create'):
-    TrackerCSRT_create = cv2.TrackerCSRT_create
-elif hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
-    TrackerCSRT_create = cv2.legacy.TrackerCSRT_create
-else:
-    raise RuntimeError("TrackerCSRT를 찾을 수 없습니다.")
+# 가능한 Tracker 생성 함수 찾기 (CSRT, KCF, MOSSE 순)
+Tracker_create = None
+for t in ('CSRT', 'KCF', 'MOSSE'):
+    func = f'Tracker{t}_create'
+    if hasattr(cv2, func):
+        Tracker_create = getattr(cv2, func)
+        print(f"Using cv2.{func}")
+        break
+    elif hasattr(cv2, 'legacy') and hasattr(cv2.legacy, func):
+        Tracker_create = getattr(cv2.legacy, func)
+        print(f"Using cv2.legacy.{func}")
+        break
+if Tracker_create is None:
+    raise RuntimeError("이 OpenCV 빌드에 사용 가능한 Tracker가 없습니다.")
 
 def capture_and_process():
     global trackers, next_id, frame_count
@@ -195,8 +202,8 @@ def capture_and_process():
             # trackers 초기화
             trackers = []
             for x,y,w,h,lbl,conf in dets:
-                trk = TrackerCSRT_create()
-                trk.init(frame, (x,y,w,h))
+                trk = Tracker_create()
+                trk.init(frame, (x, y, w, h))
                 trackers.append((trk, next_id, lbl, conf))
                 next_id += 1
 
@@ -206,7 +213,7 @@ def capture_and_process():
             new_trackers = []
             boxes_to_draw = []
             # 추적 단계
-            for trk, tid, lbl, _ in trackers:
+            for trk, tid, lbl, old_conf in trackers:
                 ok, box = trk.update(frame)
                 if not ok:
                     continue
@@ -224,8 +231,8 @@ def capture_and_process():
                     lbl = results.names[int(cls)]
                     if lbl not in label_map: continue
                     x1,y1,x2,y2 = map(int, box)
-                    trk = TrackerCSRT_create()
-                    trk.init(frame, (x1,y1,x2-x1,y2-y1))
+                    trk = Tracker_create()
+                    trk.init(frame, (x1, y1, x2-x1, y2-y1))
                     trackers.append((trk, next_id, lbl, float(conf)))
                     boxes_to_draw.append((x1, y1, x2, y2, lbl, float(conf)))
                     next_id += 1
@@ -233,7 +240,7 @@ def capture_and_process():
         # 시각화
         for x1,y1,x2,y2,lbl,conf in boxes_to_draw:
             color = (255,0,0) if lbl=='person' else (0,0,255)
-            cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             text = f"{label_map[lbl]} {conf*100:.1f}%" if conf else label_map[lbl]
             cv2.putText(frame, text, (x1, y1-10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
