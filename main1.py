@@ -93,7 +93,7 @@ class CSICamera:
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=6
+            main={"size": (720, 480)}, lores={"size": (640, 360)}, buffer_count=6
         )
         self.picam2.configure(cfg)
         self.picam2.start()
@@ -112,8 +112,8 @@ class USBCamera:
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
                 for _ in range(5):
                     cap.read()
