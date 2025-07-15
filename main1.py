@@ -15,6 +15,12 @@ import threading
 import queue
 import subprocess
 import cv2
+# legacy TrackerCSRT 생성 함수 지원
+if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+    TrackerCSRT = cv2.legacy.TrackerCSRT_create
+else:
+    TrackerCSRT = cv2.TrackerCSRT_create
+
 import torch
 import psutil
 import numpy as np
@@ -173,7 +179,7 @@ def capture_and_process():
             # —— 2) 트래커 초기화 —— 
             trackers = []
             for x, y, w, h, lbl, conf in dets:
-                tr = cv2.TrackerCSRT_create()
+                tr = TrackerCSRT()
                 tr.init(frame, (x, y, w, h))
                 trackers.append((tr, lbl))
                 detections_to_draw.append((x, y, x + w, y + h, lbl, conf))
