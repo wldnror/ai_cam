@@ -21,7 +21,7 @@ import psutil
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화 (X 서버가 있을 때만)
+# 0) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
@@ -31,31 +31,27 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (DetectMultiBackend + AutoShape)
+# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
-
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
-# 디바이스 설정
 device = select_device('cpu')
 WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
     print(f"Downloading weights to {WEIGHTS}...")
     torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt',
-        WEIGHTS
+        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
     )
-
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
 
-# confidence threshold 조정 (0.0~1.0)
+# confidence threshold 설정 (기본 0.25 → 필요시 조정)
 model.conf = 0.25
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -70,7 +66,6 @@ class CSICamera:
         )
         self.picam2.configure(cfg)
         self.picam2.start()
-        # 워밍업 프레임 드랍
         for _ in range(3):
             self.picam2.capture_array("main")
 
@@ -100,7 +95,7 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# CSI 카메라 우선, 실패하면 USB
+# CSI 모듈 시도, 실패 시 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -124,12 +119,12 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 1) 모델 추론 & 렌더링
+        # 1) 추론 & 렌더링
         with torch.no_grad():
             results = model(frame, size=target_size)
-            results.render()  # frame 위에 박스 & 라벨 그리기
+            results.render()  # frame 위에 박스와 라벨을 그림
 
-        # 2) 렌더된 이미지 가져와 BGR로 변환
+        # 2) 결과 가져오기 (RGB → BGR)
         annotated = results.imgs[0]
         frame = cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR)
 
@@ -145,7 +140,9 @@ def capture_and_process():
 
         # 4) FPS 유지
         elapsed = time.time() - start
-        time.sleep(max(0, interval - elapsed))
+        sleep = interval - elapsed
+        if sleep > 0:
+            time.sleep(sleep)
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
@@ -170,7 +167,7 @@ def get_network_signal(interface='wlan0'):
 
 @app.route('/')
 def index():
-    return render_template('index.html')  # index.html 안에 <img src="/video_feed"> 필요
+    return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
