@@ -2,12 +2,11 @@
 import cv2
 import psutil
 import subprocess
-import threading
 from flask import Flask, Response, render_template, jsonify
 
-# CSI 카메라 (Picamera2) 지원 여부 확인
+# Picamera2와 DRM 프리뷰용 Preview 클래스 가져오기
 try:
-    from picamera2 import Picamera2
+    from picamera2 import Picamera2, Preview
     has_picam = True
 except ImportError:
     has_picam = False
@@ -18,35 +17,20 @@ if has_picam:
     config = picam2.create_video_configuration(main={"size": (1280, 720)})
     picam2.configure(config)
     picam2.start()
+    # DRM/KMS 프리뷰 시작 (데스크탑 UI 없이도 HDMI에 영상 출력)
+    picam2.start_preview(Preview.DRM)
 else:
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     if not cap.isOpened():
         raise RuntimeError('카메라를 시작할 수 없습니다.')
+    # USB 카메라인 경우, DRM 프리뷰가 지원되지 않습니다.
+    # 데스크탑 UI가 없으면 로컬 프리뷰는 불가능하고, 웹 스트리밍만 사용해야 합니다.
 
 app = Flask(__name__)
 
-def show_local_window():
-    """별도 스레드에서 화면을 로컬 윈도로 띄워줍니다."""
-    window_name = "Camera Preview"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    while True:
-        if has_picam:
-            rgb = picam2.capture_array()
-            frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        else:
-            ret, frame = cap.read()
-            if not ret:
-                continue
-        cv2.imshow(window_name, frame)
-        # 1ms 대기: 이 값이 너무 크면 화면이 끊기고, 0이면 키 입력 대기
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    cv2.destroyWindow(window_name)
-
 def generate():
-    """Flask HTTP 스트리밍용 제너레이터."""
     while True:
         if has_picam:
             rgb = picam2.capture_array()
@@ -55,7 +39,6 @@ def generate():
             ret, frame = cap.read()
             if not ret:
                 continue
-
         ret, buffer = cv2.imencode('.jpg', frame)
         if not ret:
             continue
@@ -103,9 +86,4 @@ def stats():
     )
 
 if __name__ == '__main__':
-    # 로컬 윈도우 띄우는 스레드 시작 (daemon으로 설정)
-    t = threading.Thread(target=show_local_window, daemon=True)
-    t.start()
-
-    # Flask 서버 실행
     app.run(host='0.0.0.0', port=5000)
