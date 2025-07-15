@@ -150,16 +150,23 @@ except Exception as e:
 # ──────────────────────────────────────────────────────────────────────────────
 frame_queue = queue.Queue(maxsize=3)
 
-# tracking 준비: cv2.legacy 네임스페이스 사용
-trackers = cv2.legacy.MultiTracker_create()
-tracking_ids = []
+# trackers 리스트로 직접 관리
+trackers = []  # (tracker, id, label)
 next_id = 0
 REDTECT_INTERVAL = 30
 frame_count = 0
 DETECT_CONF_THRESH = 0.4
 
+# TrackerCSRT 생성 함수 결정
+if hasattr(cv2, 'TrackerCSRT_create'):
+    TrackerCSRT_create = cv2.TrackerCSRT_create
+elif hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+    TrackerCSRT_create = cv2.legacy.TrackerCSRT_create
+else:
+    raise RuntimeError("TrackerCSRT를 찾을 수 없습니다.")
+
 def capture_and_process():
-    global trackers, tracking_ids, next_id, frame_count
+    global trackers, next_id, frame_count
 
     fps = 15
     interval = 1.0 / fps
@@ -173,8 +180,8 @@ def capture_and_process():
 
         maybe_switch_model()
 
-        # 재감지 주기 또는 트래커가 없을 때
-        if frame_count % REDTECT_INTERVAL == 1 or len(tracking_ids) == 0:
+        # 재감지 시점
+        if frame_count % REDTECT_INTERVAL == 1 or not trackers:
             with torch.no_grad():
                 results = model(frame, size=target_size)
             dets = []
@@ -185,38 +192,41 @@ def capture_and_process():
                 x1,y1,x2,y2 = map(int, box)
                 dets.append((x1, y1, x2-x1, y2-y1, lbl, float(conf)))
 
-            trackers = cv2.legacy.MultiTracker_create()
-            tracking_ids.clear()
-
+            # trackers 초기화
+            trackers = []
             for x,y,w,h,lbl,conf in dets:
-                trk = cv2.legacy.TrackerCSRT_create()
-                trackers.add(trk, frame, (x,y,w,h))
-                tracking_ids.append((next_id, lbl))
+                trk = TrackerCSRT_create()
+                trk.init(frame, (x,y,w,h))
+                trackers.append((trk, next_id, lbl, conf))
                 next_id += 1
 
-            boxes_to_draw = [(x,y,x+w,y+h,lbl,conf) for x,y,w,h,lbl,conf in dets]
+            boxes_to_draw = [(x, y, x+w, y+h, lbl, conf) for x,y,w,h,lbl,conf in dets]
 
         else:
-            ok, boxes = trackers.update(frame)
+            new_trackers = []
             boxes_to_draw = []
-            for idx, good in enumerate(ok):
-                if not good: continue
-                x,y,w,h = boxes[idx]
-                _id, lbl = tracking_ids[idx]
-                boxes_to_draw.append((int(x), int(y), int(x+w), int(y+h), lbl, None))
+            # 추적 단계
+            for trk, tid, lbl, _ in trackers:
+                ok, box = trk.update(frame)
+                if not ok:
+                    continue
+                x,y,w,h = map(int, box)
+                new_trackers.append((trk, tid, lbl, None))
+                boxes_to_draw.append((x, y, x+w, y+h, lbl, None))
+            trackers = new_trackers
 
-            # 중간 재감지로 신규 객체 추가(옵션)
+            # 중간 재감지로 신규 객체 추가 (옵션)
             if frame_count % REDTECT_INTERVAL == 0:
                 with torch.no_grad():
                     results2 = model(frame, size=target_size)
                 for *box, conf, cls in results2.xyxy[0]:
                     if float(conf) < DETECT_CONF_THRESH: continue
-                    lbl = results2.names[int(cls)]
+                    lbl = results.names[int(cls)]
                     if lbl not in label_map: continue
                     x1,y1,x2,y2 = map(int, box)
-                    trk = cv2.legacy.TrackerCSRT_create()
-                    trackers.add(trk, frame, (x1,y1,x2-x1,y2-y1))
-                    tracking_ids.append((next_id, lbl))
+                    trk = TrackerCSRT_create()
+                    trk.init(frame, (x1,y1,x2-x1,y2-y1))
+                    trackers.append((trk, next_id, lbl, float(conf)))
                     boxes_to_draw.append((x1, y1, x2, y2, lbl, float(conf)))
                     next_id += 1
 
@@ -228,9 +238,10 @@ def capture_and_process():
             cv2.putText(frame, text, (x1, y1-10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
-        # JPEG 인코딩 & 큐
+        # JPEG 인코딩 & 큐 업로드
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-        if not frame_queue.empty(): frame_queue.get_nowait()
+        if not frame_queue.empty():
+            frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
         elapsed = time.time() - start
@@ -255,8 +266,8 @@ def index():
 def video_feed():
     resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
-        'Cache-Control':'no-cache, no-store, must-revalidate',
-        'Pragma':'no-cache', 'Expires':'0'
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache', 'Expires': '0'
     })
     return resp
 
@@ -266,12 +277,14 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except: pass
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except:
+        pass
     try:
-        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except: sig = None
+    except:
+        sig = None
     return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem,
                    temperature_c=temp, wifi_signal_dbm=sig)
 
