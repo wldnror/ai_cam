@@ -62,7 +62,7 @@ from utils.torch_utils import select_device
 device = select_device('cpu')
 
 # 단일 모델 로드 설정: 온도 기반 스위치 기능 제거
-MODEL_NAME = "yolov5n.pt"
+MODEL_NAME = "yolov5m.pt"
 backend = None
 model = None
 
