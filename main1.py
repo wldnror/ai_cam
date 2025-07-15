@@ -1,141 +1,254 @@
 #!/usr/bin/env python3
-import warnings, logging, os, sys, time, threading, queue, subprocess
-import cv2, torch, psutil, numpy as np
+import warnings
+warnings.filterwarnings("ignore")  # 모든 파이썬 경고 억제
+
+import logging
+logging.getLogger('ultralytics').setLevel(logging.WARNING)
+logging.getLogger('torch').setLevel(logging.WARNING)
+werkzeug_log = logging.getLogger('werkzeug')
+werkzeug_log.setLevel(logging.ERROR)
+
+import os
+import sys
+import time
+import threading
+import queue
+import subprocess
+import cv2
+import torch
+import psutil
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from flask import Flask, Response, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify, request
 
-# ────────── 0) SORT 소스 경로 추가 ──────────
-sys.path.append(os.path.join(os.path.dirname(__file__), 'sort'))
-from sort import Sort
+# ④ DeepSORT 트래커 불러오기
+from deep_sort_realtime.deepsort_tracker import DeepSort  #  [oai_citation:0‡PyPI](https://pypi.org/project/deep-sort-realtime/)
 
-# ────────── 1) 한글 폰트 로드 ──────────
+# ----------------------------------------
+# 0) 한글 폰트 설치 확인 및 로드
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
 if not os.path.exists(FONT_PATH):
-    subprocess.run(['sudo','apt-get','update'], check=True)
-    subprocess.run(['sudo','apt-get','install','-y','fonts-nanum'], check=True)
+    try:
+        print("한글 폰트가 없어 설치를 시도합니다...")
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+    except Exception as e:
+        print(f"폰트 설치 실패: {e}")
 try:
     font = ImageFont.truetype(FONT_PATH, 24)
-except:
+except Exception:
     font = ImageFont.load_default()
+    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
 
-# ────────── 2) 화면 절전 해제 ──────────
-if os.environ.get('DISPLAY'):
-    os.system('setterm -blank 0 -powerdown 0 -powersave off')
-    os.system('xset s off; xset s noblank; xset -dpms')
+# ----------------------------------------
+# 1) 화면 절전/DPMS 비활성화
+try:
+    if os.environ.get('DISPLAY'):
+        os.system('setterm -blank 0 -powerdown 0 -powersave off')
+        os.system('xset s off; xset s noblank; xset -dpms')
+        print("⏱️ 화면 절전/스크린세이버 비활성화 완료")
+except Exception:
+    pass
 
-# ────────── 3) YOLOv5 로드 ──────────
-torch.set_num_threads(8); torch.set_num_interop_threads(8)
+# ----------------------------------------
+# 2) PyTorch 스레드 수 & YOLOv5 모델 로드
+torch.set_num_threads(8)
+torch.set_num_interop_threads(8)
+
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
-    subprocess.run(['git','clone','https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
+    subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
 from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-backend = DetectMultiBackend(os.path.join(YOLOROOT,'yolov5n.pt'), device=device, fuse=True)
-backend.model.eval()
-model = AutoShape(backend.model)
-label_map = {'person':'사람','car':'자동차'}
 
-# ────────── 4) 카메라 추상화 ──────────
+MODEL_NAME = "yolov5n.pt"
+backend = None
+model = None
+
+def load_model(weights_name):
+    global backend, model
+    weights_path = os.path.join(YOLOROOT, weights_name)
+    if not os.path.exists(weights_path):
+        torch.hub.download_url_to_file(
+            f'https://github.com/ultralytics/yolov5/releases/download/v7.0/{weights_name}',
+            weights_path
+        )
+    backend = DetectMultiBackend(weights_path, device=device, fuse=True)
+    backend.model.eval()
+    model = AutoShape(backend.model)
+    print(f"[MODEL] Loaded {weights_name}")
+
+load_model(MODEL_NAME)
+
+label_map = {'person': '사람', 'car': '자동차'}
+
+# ----------------------------------------
+# 3) 카메라 클래스 정의
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
-        self.pic = Picamera2()
-        cfg = self.pic.create_video_configuration(main={"size":(720,480)})
-        self.pic.configure(cfg); self.pic.start()
-        for _ in range(3): self.pic.capture_array("main")
+        self.picam2 = Picamera2()
+        cfg = self.picam2.create_video_configuration(
+            main={"size": (720, 480)}, lores={"size": (640, 360)}, buffer_count=6
+        )
+        self.picam2.configure(cfg)
+        self.picam2.start()
+        for _ in range(3):
+            self.picam2.capture_array("main")
+
     def read(self):
-        rgb = self.pic.capture_array("main")
-        return True, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        rgb = self.picam2.capture_array("main")
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        return True, bgr
 
 class USBCamera:
     def __init__(self):
-        self.cap = next((cv2.VideoCapture(i) for i in range(5) if cv2.VideoCapture(i).isOpened()), None)
-        if not self.cap: raise RuntimeError("No USB camera")
+        self.cap = None
+        for i in range(5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
+                for _ in range(5):
+                    cap.read()
+                self.cap = cap
+                break
+        if not self.cap:
+            raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
+
     def read(self):
         return self.cap.read()
 
 try:
     camera = CSICamera()
-    print(">>> CSI camera")
-except:
+    print(">>> Using CSI camera module")
+except Exception as e:
+    print(f"[ERROR] CSI init failed: {e}")
     camera = USBCamera()
-    print(">>> USB camera")
+    print(">>> Using USB webcam")
 
-# ────────── 5) SORT 트래커 초기화 ──────────
-tracker = Sort(max_age=10, min_hits=3, iou_threshold=0.3)
-frame_q = queue.Queue(maxsize=3)
-fps_lock = threading.Lock(); current_fps = 0.0
+# ----------------------------------------
+# 4) DeepSORT 트래커 & 프레임 처리
+tracker = DeepSort(max_age=10)  # 트랙은 최대 10프레임까지 유지  [oai_citation:1‡PyPI](https://pypi.org/project/deep-sort-realtime/)
+
+frame_queue = queue.Queue(maxsize=3)
+current_fps = 0.0
+fps_lock = threading.Lock()
 
 def capture_and_process():
     global current_fps
-    fps_interval = 1/10
+    fps = 10
+    interval = 1.0 / fps
+    target_size = 270
+
     while True:
-        t0 = time.time()
+        start = time.time()
         ret, frame = camera.read()
-        if not ret: continue
+        if not ret:
+            continue
 
         # YOLO 검출
-        res = model(frame, size=270)
-        dets = []
-        for *box, conf, cls in res.xyxy[0]:
-            lbl = res.names[int(cls)]
-            if lbl not in label_map: continue
-            x1,y1,x2,y2 = map(int, box)
-            dets.append([x1,y1,x2,y2,float(conf)])
+        with torch.no_grad():
+            results = model(frame, size=target_size)
 
-        # SORT 업데이트
-        dets_np = np.array(dets) if dets else np.empty((0,5))
-        tracks = tracker.update(dets_np)
+        # DeepSORT용 detections 준비
+        bbs = []
+        for *box, conf, cls in results.xyxy[0]:
+            label = results.names[int(cls)]
+            if label not in label_map:
+                continue
+            x1, y1, x2, y2 = map(int, box)
+            w, h = x2 - x1, y2 - y1
+            # ([left,top,width,height], confidence, class)
+            bbs.append(([x1, y1, w, h], float(conf), label))  #  [oai_citation:2‡PyPI](https://pypi.org/project/deep-sort-realtime/)
 
-        # 박스 그리기
-        for x1,y1,x2,y2,tid in tracks.astype(int):
-            cv2.rectangle(frame, (x1,y1),(x2,y2),(0,0,255),2)
-            cv2.putText(frame, f"ID{tid}", (x1,y1-5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255),2)
+        # DeepSORT 업데이트 → Track 객체 리스트 반환
+        tracks = tracker.update_tracks(bbs, frame=frame)
 
-        # 인코딩 & 큐
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY),60])
-        if not frame_q.empty(): frame_q.get_nowait()
-        frame_q.put(buf.tobytes())
+        # 트랙마다 상자 그리기
+        for track in tracks:
+            if not track.is_confirmed():
+                continue
+            tid = track.track_id
+            l, t, r, b = track.to_ltrb()  # left, top, right, bottom
+            cls = track.det_class  # detection_class에 지정한 값
+            color = (255,0,0) if cls=='person' else (0,0,255)
+            cv2.rectangle(frame, (int(l),int(t)), (int(r),int(b)), color, 2)
+            cv2.putText(frame,
+                        f"{label_map.get(cls,cls)} {tid}",
+                        (int(l), int(t)-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+        # JPEG 인코딩 및 큐 관리
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        if not frame_queue.empty():
+            frame_queue.get_nowait()
+        frame_queue.put(buf.tobytes())
 
         # FPS 계산
+        elapsed = time.time() - start
         with fps_lock:
-            elapsed = time.time()-t0
-            current_fps = 1/elapsed if elapsed>0 else 0
-        time.sleep(max(0, fps_interval - elapsed))
+            current_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+
+        time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# ────────── 6) Flask 서버 ──────────
+# ----------------------------------------
+# 5) Flask 앱 & 엔드포인트
 app = Flask(__name__)
 
-def gen():
+def generate():
     while True:
-        f = frame_q.get()
+        frame = frame_queue.get()
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n'+f+b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route('/')
+def index():
+    return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(gen(),
-                    mimetype='multipart/x-mixed-replace;boundary=frame')
-    resp.headers.update({'Cache-Control':'no-cache'})
+    resp = Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    })
     return resp
 
 @app.route('/stats')
 def stats():
-    cpu = psutil.cpu_percent(0.5)
+    cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000
-    except: temp = None
-    with fps_lock: fpsv = round(current_fps,1)
-    return jsonify(camera=1, cpu_percent=cpu,
-                   memory_percent=mem,
-                   temperature_c=temp, fps=fpsv)
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except Exception:
+        temp = None
+    try:
+        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
+    except Exception:
+        sig = None
 
-if __name__=='__main__':
+    with fps_lock:
+        fps_val = round(current_fps, 1)
+
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem,
+        temperature_c=temp,
+        wifi_signal_dbm=sig,
+        fps=fps_val
+    )
+
+if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
