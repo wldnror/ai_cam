@@ -143,7 +143,7 @@ def capture_and_process():
     global current_fps
     fps = 20
     interval = 1.0 / fps
-    target_size = 200
+    target_size = 100
 
     while True:
         start = time.time()
