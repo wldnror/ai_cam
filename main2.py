@@ -10,18 +10,34 @@ werkzeug_log.setLevel(logging.ERROR)
 
 import os
 import sys
-import time
 import threading
 import queue
 import subprocess
-
 import cv2
 import torch
 import psutil
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0) 화면 절전/DPMS 비활성화
+# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+if not os.path.exists(FONT_PATH):
+    try:
+        print("한글 폰트가 없어 설치를 시도합니다...")
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+    except Exception as e:
+        print(f"폰트 설치 실패: {e}")
+try:
+    font = ImageFont.truetype(FONT_PATH, 24)
+except Exception:
+    font = ImageFont.load_default()
+    print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
         os.system('setterm -blank 0 -powerdown 0 -powersave off')
@@ -31,10 +47,13 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
+# 2) PyTorch 스레드 수 최적화 & YOLOv5 모델 로드
+physical_cores = psutil.cpu_count(logical=False) or 1
+torch.set_num_threads(physical_cores)
+torch.set_num_interop_threads(physical_cores)
+
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
-    print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
     subprocess.run(['git', 'clone', 'https://github.com/ultralytics/yolov5.git', YOLOROOT], check=True)
 sys.path.insert(0, YOLOROOT)
 from models.common import DetectMultiBackend, AutoShape
@@ -43,24 +62,30 @@ from utils.torch_utils import select_device
 device = select_device('cpu')
 WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
 if not os.path.exists(WEIGHTS):
-    print(f"Downloading weights to {WEIGHTS}...")
     torch.hub.download_url_to_file(
         'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
     )
-# DetectMultiBackend 로 로드 후 AutoShape 래핑
 backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
 backend.model.eval()
 model = AutoShape(backend.model)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 클래스 정의
+# 한글 레이블 매핑
+label_map = {
+    'person': '사람',
+    'car':    '자동차'
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) 카메라 클래스 정의 (CSI / USB)
 class CSICamera:
-    """CSI 카메라를 Picamera2로 제어"""
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2
+            main={"size": (1280, 720)},
+            lores={"size": (640, 360)},
+            buffer_count=6
         )
         self.picam2.configure(cfg)
         self.picam2.start()
@@ -68,10 +93,11 @@ class CSICamera:
             self.picam2.capture_array("main")
 
     def read(self):
-        return True, self.picam2.capture_array("main")
+        rgb = self.picam2.capture_array("main")
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        return True, bgr
 
 class USBCamera:
-    """USB 웹캠을 OpenCV로 제어"""
     def __init__(self):
         self.cap = None
         for i in range(5):
@@ -80,7 +106,7 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
                 for _ in range(5): cap.read()
                 self.cap = cap
                 break
@@ -90,7 +116,6 @@ class USBCamera:
     def read(self):
         return self.cap.read()
 
-# CSI 모듈 시도, 실패 시 USB
 try:
     camera = CSICamera()
     print(">>> Using CSI camera module")
@@ -100,74 +125,68 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 백그라운드 프레임 처리 스레드
-frame_queue = queue.Queue(maxsize=1)
+# 4) 비동기 파이프라인: 캡처 → 추론 → 출력
+capture_queue = queue.Queue(maxsize=1)
+output_queue  = queue.Queue(maxsize=1)
 
-def capture_and_process():
-    fps = 10
-    interval = 1.0 / fps
-    target_size = 320  # AutoShape로 크기 지정
-    skip_interval = 2
-    frame_count = 0
-
+def capture_loop():
     while True:
-        start = time.time()
         ret, frame = camera.read()
-        if not ret:
-            continue
+        if not ret: continue
+        if capture_queue.full():
+            try: capture_queue.get_nowait()
+            except queue.Empty: pass
+        capture_queue.put(frame)
 
-        frame_count += 1
-        if frame_count % skip_interval == 0:
-            with torch.no_grad():
-                # AutoShape: BGR->RGB + 전처리 + 후처리
-                results = model(frame, size=target_size)
 
-            # 박스 드로잉
-            for *box, conf, cls in results.xyxy[0]:
-                x1, y1, x2, y2 = map(int, box)
-                label = results.names[int(cls)]
-                if label in ('person', 'car'):
-                    color = (0, 0, 255) if label == 'person' else (255, 0, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, label, (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+def inference_loop():
+    target_size = 320
+    while True:
+        frame = capture_queue.get()
+        with torch.no_grad():
+            results = model(frame, size=target_size)
 
-        # JPEG로 인코딩 후 큐에 삽입
+        # 결과 박스 파싱 및 그리기
+        boxes = []
+        for *box, conf, cls in results.xyxy[0]:
+            label = results.names[int(cls)]
+            if label not in label_map: continue
+            x1, y1, x2, y2 = map(int, box)
+            boxes.append((x1, y1, x2, y2, label, float(conf)))
+
+        for x1, y1, x2, y2, label, conf in boxes:
+            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        img_pil = Image.fromarray(frame[:, :, ::-1])
+        draw = ImageDraw.Draw(img_pil)
+        for x1, y1, x2, y2, label, conf in boxes:
+            text = f"{label_map[label]} {conf*100:.1f}%"
+            size = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
+        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+        # 인코딩 및 큐 업로드
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        data = buf.tobytes()
-        if not frame_queue.empty():
-            try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
-        frame_queue.put(data)
+        if output_queue.full():
+            try: output_queue.get_nowait()
+            except queue.Empty: pass
+        output_queue.put(buf.tobytes())
 
-        # FPS 유지
-        elapsed = time.time() - start
-        sleep = interval - elapsed
-        if sleep > 0:
-            time.sleep(sleep)
-
-threading.Thread(target=capture_and_process, daemon=True).start()
+# 스레드 시작
+threading.Thread(target=capture_loop, daemon=True).start()
+threading.Thread(target=inference_loop, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) Flask 앱 및 엔드포인트
+# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
     while True:
-        frame = frame_queue.get()
+        frame = output_queue.get()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-def get_network_signal(interface='wlan0'):
-    try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except Exception:
-        return None
 
 @app.route('/')
 def index():
@@ -175,8 +194,7 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
@@ -187,20 +205,18 @@ def video_feed():
 @app.route('/stats')
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
+    mem = psutil.virtual_memory().percent
     temp = None
     try:
         temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
+    except:
         pass
-    sig = get_network_signal('wlan0')
-    return jsonify(
-        camera=1,
-        cpu_percent=cpu,
-        memory_percent=mem.percent,
-        temperature_c=temp,
-        wifi_signal_dbm=sig
-    )
+    try:
+        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
+    except:
+        sig = None
+    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
