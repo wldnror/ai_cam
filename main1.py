@@ -178,7 +178,7 @@ frame_queue = queue.Queue(maxsize=3)
 def capture_and_process():
     fps = 30                # 스트리밍 프레임레이트
     interval = 1.0 / fps
-    target_size = 160
+    target_size = 200
 
     while True:
         start = time.time()
