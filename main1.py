@@ -197,42 +197,15 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame
-'
-               b'Content-Type: image/jpeg
-
-' + frame + b'
-')
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n'
+            + frame +
+            b'\r\n'
+        )
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
-def video_feed():
-    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    })
-    return resp
-
-@app.route('/stats')
-def stats():
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory().percent
-    temp = None
-    try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
-        pass
-    try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
-        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except Exception:
-        sig = None
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
