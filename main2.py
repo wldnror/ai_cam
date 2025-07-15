@@ -14,6 +14,7 @@ import time
 import threading
 import queue
 import subprocess
+import glob
 
 import cv2
 import torch
@@ -31,7 +32,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) YOLOv5 모델 로드 (로컬 클론 + DetectMultiBackend + AutoShape)
+# 1) YOLOv5 모델 로드 (DetectMultiBackend + AutoShape)
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
     print(f"Cloning YOLOv5 repo to {YOLOROOT}...")
@@ -52,115 +53,136 @@ backend.model.eval()
 model = AutoShape(backend.model)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2) 카메라 클래스 정의
-class CSICamera:
-    """CSI 카메라를 Picamera2로 제어"""
-    def __init__(self):
-        from picamera2 import Picamera2
-        self.picam2 = Picamera2()
-        cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)}, lores={"size": (640, 360)}, buffer_count=2
-        )
-        self.picam2.configure(cfg)
-        self.picam2.start()
-        for _ in range(3):
-            self.picam2.capture_array("main")
-
-    def read(self):
-        return True, self.picam2.capture_array("main")
-
+# 2) USB 캠 정의 및 재시작 로직
 class USBCamera:
-    """USB 웹캠을 OpenCV로 제어"""
     def __init__(self):
         self.cap = None
-        for i in range(5):
-            cap = cv2.VideoCapture(i)
+        self.open()
+
+    def open(self):
+        # /dev/video*에서 사용 가능한 디바이스 검색
+        device_paths = sorted(glob.glob('/dev/video*'))
+        for dev in device_paths:
+            cap = cv2.VideoCapture(dev)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                for _ in range(5): cap.read()
+                for _ in range(5):
+                    cap.read()
                 self.cap = cap
-                break
-        if not self.cap:
-            raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
+                print(f"[INFO] Opened camera device: {dev}")
+                return
+        raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
+
+    def restart(self):
+        try:
+            if self.cap:
+                self.cap.release()
+        except:
+            pass
+        time.sleep(1)
+        print("[INFO] Restarting USB camera...")
+        self.open()
+        print("[INFO] USB camera reinitialized.")
 
     def read(self):
         return self.cap.read()
 
-# CSI 모듈 시도, 실패 시 USB
+# 초기 카메라 생성
 try:
-    camera = CSICamera()
-    print(">>> Using CSI camera module")
-except Exception as e:
-    print(f"[ERROR] CSI init failed: {e}")
     camera = USBCamera()
-    print(">>> Using USB webcam")
+except Exception as e:
+    print(f"[ERROR] 초기 카메라 열기 실패: {e}")
+    sys.exit(1)
+print(">>> Using USB webcam only")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) 백그라운드 프레임 처리 스레드
-frame_queue = queue.Queue(maxsize=1)
+# 3) 큐 및 쓰레드 구조
+raw_queue = queue.Queue(maxsize=2)
+frame_queue = queue.Queue(maxsize=2)
 
-def capture_and_process():
+_last_frame_time = time.time()
+
+def capture_loop():
+    global _last_frame_time, camera
+    while True:
+        try:
+            ret, frame = camera.read()
+        except Exception as e:
+            print(f"[ERROR] Camera read exception: {e}")
+            camera.restart()
+            continue
+
+        now = time.time()
+        if ret:
+            _last_frame_time = now
+            if not raw_queue.full():
+                raw_queue.put(frame)
+        else:
+            if now - _last_frame_time > 2.0:
+                print("[WARN] No frames received for 2s, attempting camera restart")
+                camera.restart()
+                _last_frame_time = now
+            time.sleep(0.01)
+
+
+def inference_loop():
     fps = 10
     interval = 1.0 / fps
-    target_size = 320  # AutoShape로 크기 지정
+    target_size = 320
     skip_interval = 2
-    frame_count = 0
-
-    # FPS 로그용 변수
-    last_log_time = time.time()
+    count = 0
+    last_log = time.time()
     infer_count = 0
 
     while True:
         start = time.time()
-        ret, frame = camera.read()
-        if not ret:
+        try:
+            frame = raw_queue.get(timeout=1)
+        except queue.Empty:
+            print("[WARN] raw_queue empty, skipping inference")
             continue
 
-        frame_count += 1
-        if frame_count % skip_interval == 0:
-            infer_start = time.time()
-            with torch.no_grad():
-                results = model(frame, size=target_size)
-            infer_time = time.time() - infer_start
-            infer_count += 1
-
-            # 10회마다 실제 추론 FPS 및 레이턴시 로그 출력
-            if infer_count % 10 == 0:
-                now = time.time()
-                real_fps = 10 / (now - last_log_time)
-                print(f"[INFO] Inference FPS: {real_fps:.2f}, Avg latency: {infer_time*1000:.1f} ms")
-                last_log_time = now
-
-            # 박스 드로잉
-            for *box, conf, cls in results.xyxy[0]:
-                x1, y1, x2, y2 = map(int, box)
-                label = results.names[int(cls)]
-                if label in ('person', 'car'):
-                    color = (0, 0, 255) if label == 'person' else (255, 0, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, label, (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        # JPEG로 인코딩 후 큐에 삽입
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-        data = buf.tobytes()
-        if not frame_queue.empty():
+        count += 1
+        if count % skip_interval == 0:
             try:
-                frame_queue.get_nowait()
-            except queue.Empty:
-                pass
-        frame_queue.put(data)
+                inf_start = time.time()
+                with torch.no_grad():
+                    results = model(frame, size=target_size)
+                inf_time = (time.time() - inf_start) * 1000
+                infer_count += 1
 
-        # FPS 유지
+                if infer_count % 10 == 0:
+                    now = time.time()
+                    real_fps = 10 / (now - last_log)
+                    print(f"[INFO] Inference FPS: {real_fps:.2f}, Avg latency: {inf_time:.1f} ms")
+                    last_log = now
+
+                for *box, conf, cls in results.xyxy[0]:
+                    x1, y1, x2, y2 = map(int, box)
+                    label = results.names[int(cls)]
+                    if label in ('person', 'car'):
+                        color = (0,0,255) if label=='person' else (255,0,0)
+                        cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
+                        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            except Exception as e:
+                print(f"[ERROR] Inference exception: {e}")
+
+        try:
+            _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY),80])
+            if not frame_queue.full():
+                frame_queue.put(buf.tobytes())
+        except Exception as e:
+            print(f"[ERROR] JPEG encoding exception: {e}")
+
         elapsed = time.time() - start
-        sleep = interval - elapsed
-        if sleep > 0:
-            time.sleep(sleep)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
 
-threading.Thread(target=capture_and_process, daemon=True).start()
+threading.Thread(target=capture_loop, daemon=True).start()
+threading.Thread(target=inference_loop, daemon=True).start()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4) Flask 앱 및 엔드포인트
@@ -172,47 +194,34 @@ def generate():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-def get_network_signal(interface='wlan0'):
-    try:
-        out = subprocess.check_output(['iwconfig', interface], stderr=subprocess.DEVNULL).decode()
-        for part in out.split():
-            if part.startswith('level='):
-                return int(part.split('=')[1])
-    except Exception:
-        return None
-
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    })
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate', 'Pragma':'no-cache','Expires':'0'})
     return resp
 
 @app.route('/stats')
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory()
+    mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
         pass
-    sig = get_network_signal('wlan0')
-    return jsonify(
-        camera=1,
-        cpu_percent=cpu,
-        memory_percent=mem.percent,
-        temperature_c=temp,
-        wifi_signal_dbm=sig
-    )
+    sig = None
+    try:
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
+        for p in out.split():
+            if p.startswith('level='):
+                sig = int(p.split('=')[1])
+    except:
+        pass
+    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
