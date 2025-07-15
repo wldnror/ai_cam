@@ -21,6 +21,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
+# 외부 트래커 SORT
+from sort import Sort
+
 # ----------------------------------------
 # 0) 한글 폰트 설치 확인 및 로드
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
@@ -60,6 +63,7 @@ from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
+
 MODEL_NAME = "yolov5n.pt"
 backend = None
 model = None
@@ -79,7 +83,6 @@ def load_model(weights_name):
 
 load_model(MODEL_NAME)
 
-# 한글 레이블 매핑
 label_map = {'person': '사람', 'car': '자동차'}
 
 # ----------------------------------------
@@ -130,42 +133,79 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 트래커 생성 함수 탐색
-# CSRT 우선, 없으면 KCF 사용, legacy fallback 포함
+# 4) 트래커 & 프레임 처리
+tracker = Sort(max_age=10, min_hits=3, iou_threshold=0.3)
 
-def _find_tracker_ctor():
-    names = [
-        'TrackerCSRT_create',
-        'legacy.TrackerCSRT_create',
-        'TrackerKCF_create',
-        'legacy.TrackerKCF_create'
-    ]
-    for name in names:
-        parts = name.split('.')
-        mod = cv2
-        for p in parts[:-1]:
-            mod = getattr(mod, p, None)
-            if mod is None:
-                break
-        if mod and hasattr(mod, parts[-1]):
-            return getattr(mod, parts[-1])
-    return None
+frame_queue = queue.Queue(maxsize=3)
+current_fps = 0.0
+fps_lock = threading.Lock()
 
-TrackerCreate = _find_tracker_ctor()
-if TrackerCreate is None:
-    print("[WARN] Compatible tracker not found. Tracking disabled; 매 프레임 YOLO로만 검출합니다.")
-    TRACKING_ENABLED = False
-else:
-    TRACKING_ENABLED = True
+def capture_and_process():
+    global current_fps
+    fps = 10
+    interval = 1.0 / fps
+    target_size = 270
+
+    while True:
+        start = time.time()
+        ret, frame = camera.read()
+        if not ret:
+            continue
+
+        # YOLO 검출
+        with torch.no_grad():
+            results = model(frame, size=target_size)
+
+        # 박스 리스트 준비 ([x1,y1,x2,y2,conf])
+        dets = []
+        cls_list = []
+        for *box, conf, cls in results.xyxy[0]:
+            label = results.names[int(cls)]
+            if label not in label_map:
+                continue
+            x1, y1, x2, y2 = map(int, box)
+            dets.append([x1, y1, x2, y2, float(conf)])
+            cls_list.append(label)
+
+        dets_np = np.array(dets) if dets else np.empty((0,5))
+
+        # SORT 업데이트 → 트랙들 반환
+        tracks = tracker.update(dets_np)
+
+        # 트랙마다 상자 그리기
+        for trk in tracks:
+            x1, y1, x2, y2, track_id = trk.astype(int)
+            # 트랙 ID에 매핑되는 라벨 색인 찾기 (간단히 IoU로 매칭)
+            color = (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"ID:{track_id}",
+                        (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+
+        # JPEG 인코딩 및 큐 관리
+        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        if not frame_queue.empty():
+            frame_queue.get_nowait()
+        frame_queue.put(buf.tobytes())
+
+        # FPS 계산
+        elapsed = time.time() - start
+        with fps_lock:
+            current_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+
+        time.sleep(max(0, interval - elapsed))
+
+threading.Thread(target=capture_and_process, daemon=True).start()
 
 # ----------------------------------------
-# 6) Flask 앱 및 엔드포인트 설정
+# 5) Flask 앱 & 엔드포인트
 app = Flask(__name__)
 
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
 @app.route('/')
 def index():
@@ -173,9 +213,13 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate',
-                         'Pragma':'no-cache','Expires':'0'})
+    resp = Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    })
     return resp
 
 @app.route('/stats')
@@ -184,18 +228,26 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+    except Exception:
         pass
     try:
-        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except:
+    except Exception:
         sig = None
+
     with fps_lock:
-        fps = round(current_fps,1)
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem,
-                   temperature_c=temp, wifi_signal_dbm=sig, fps=fps)
+        fps_val = round(current_fps, 1)
+
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem,
+        temperature_c=temp,
+        wifi_signal_dbm=sig,
+        fps=fps_val
+    )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
