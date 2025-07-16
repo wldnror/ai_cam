@@ -237,7 +237,7 @@ def capture_and_track():
         # ------------------------------------------------------------
 
         # 인코딩 & 큐
-        _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
+        _, buf = cv2.imencode('.webp', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
