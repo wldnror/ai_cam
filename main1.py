@@ -162,7 +162,7 @@ def create_tracker():
 def capture_and_track():
     global current_fps
     target_size = 360
-    detection_interval = 5
+    detection_interval = 10
     frame_count = 0
     trackers = []
     executor = ThreadPoolExecutor(max_workers=1)
