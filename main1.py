@@ -139,24 +139,27 @@ current_fps = 0.0
 fps_lock = threading.Lock()
 
 def create_tracker():
-    # MOSSE 트래커 우선
-    try:
-        return cv2.TrackerMOSSE_create()
-    except AttributeError:
-        pass
-    try:
-        return cv2.legacy.TrackerMOSSE_create()
-    except AttributeError:
-        pass
-    # CSRT 트래커 백업
-    try:
-        return cv2.legacy.TrackerCSRT_create()
-    except AttributeError:
-        pass
-    try:
-        return cv2.TrackerCSRT_create()
-    except AttributeError:
-        pass
+    # 다양한 OpenCV 트래커 생성자 시도 목록
+    constructors = [
+        ('cv2', 'TrackerMOSSE_create'),
+        ('cv2.legacy', 'TrackerMOSSE_create'),
+        ('cv2.legacy', 'TrackerCSRT_create'),
+        ('cv2', 'TrackerCSRT_create'),
+        ('cv2.legacy', 'TrackerKCF_create'),
+        ('cv2', 'TrackerKCF_create'),
+        ('cv2.legacy', 'TrackerMIL_create'),
+        ('cv2', 'TrackerMIL_create')
+    ]
+    for module_name, func_name in constructors:
+        try:
+            module = cv2
+            if module_name == 'cv2.legacy' and hasattr(cv2, 'legacy'):
+                module = cv2.legacy
+            tracker_fn = getattr(module, func_name, None)
+            if tracker_fn:
+                return tracker_fn()
+        except Exception:
+            continue
     raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
 
 def capture_and_track():
