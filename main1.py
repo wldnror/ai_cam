@@ -132,7 +132,7 @@ except Exception as e:
 
 # ----------------------------------------
 # 4) 객체 검출 + 트래킹 기반 프레임 처리
-frame_queue = queue.Queue(maxsize=1)
+frame_queue = queue.Queue(maxsize=5)
 current_fps = 0.0
 fps_lock = threading.Lock()
 
