@@ -144,19 +144,14 @@ detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
 tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
 
 def create_tracker():
-    # CSRT 생성: legacy 모듈이 없거나 Params 지원이 없을 때 기본 생성만 시도
-    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+    # CSRT 트래커를 기본으로 사용
+    if hasattr(cv2, 'legacy'):
         return cv2.legacy.TrackerCSRT_create()
-    if hasattr(cv2, 'TrackerCSRT_create'):
+    else:
         return cv2.TrackerCSRT_create()
-    # CSRT 미지원 시 MOSSE로 폴백
-    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerMOSSE_create'):
-        return cv2.legacy.TrackerMOSSE_create()
-    if hasattr(cv2, 'TrackerMOSSE_create'):
-        return cv2.TrackerMOSSE_create()
-    raise RuntimeError("사용 가능한 트래커가 없습니다.")
 
 # Helper for parallel tracking
+
 def track_update(tracker, label, frame):
     success, bbox = tracker.update(frame)
     return success, bbox, label
@@ -165,7 +160,7 @@ def track_update(tracker, label, frame):
 def capture_and_track():
     global current_fps
     target_size = 360
-    detection_interval = 8  # 검출 간격 설정
+    detection_interval = 5
     frame_count = 0
     trackers = []
 
@@ -180,7 +175,9 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
+            # detection phase: clear trackers
             trackers.clear()
+
             small = cv2.resize(full_frame, (target_size, target_size))
             future = detection_executor.submit(lambda img: model(img, size=target_size), small)
             results = future.result()
@@ -190,13 +187,17 @@ def capture_and_track():
                 if label not in label_map:
                     continue
                 x1, y1, x2, y2 = box
-                sx, sy = full_frame.shape[1] / target_size, full_frame.shape[0] / target_size
-                x1, y1, x2, y2 = map(int, (x1*sx, y1*sy, x2*sx, y2*sy))
+                scale_x = full_frame.shape[1] / target_size
+                scale_y = full_frame.shape[0] / target_size
+                x1 = int(x1 * scale_x); y1 = int(y1 * scale_y)
+                x2 = int(x2 * scale_x); y2 = int(y2 * scale_y)
+
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((trk, label))
                 boxes.append((x1, y1, x2, y2, label, float(conf)))
         else:
+            # tracking phase: parallel tracker updates
             futures = [tracking_executor.submit(track_update, trk, lbl, full_frame) for trk, lbl in trackers]
             new_boxes = []
             for future in futures:
@@ -207,10 +208,14 @@ def capture_and_track():
                 new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
+        # draw boxes
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255,0,0) if label=='person' else (0,0,255)
             cv2.rectangle(full_frame, (x1,y1), (x2,y2), color, 2)
-            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
+            text = (
+                f"{label_map[label]} {conf*100:.1f}%"
+                if conf is not None else f"{label_map[label]} (추적됨)"
+            )
             img_pil = Image.fromarray(full_frame[:,:,::-1])
             draw = ImageDraw.Draw(img_pil)
             w_txt, h_txt = draw.textsize(text, font=font)
@@ -218,45 +223,75 @@ def capture_and_track():
             draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
             full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
+        # encode & enqueue
         _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
-        if not frame_queue.empty(): frame_queue.get_nowait()
+        if not frame_queue.empty():
+            frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
+        # update fps
         elapsed = time.time() - start
         with fps_lock:
             current_fps = 1.0/elapsed if elapsed>0 else 0.0
+
         time.sleep(0.001)
 
 # start capture thread
 def start_capture():
     threading.Thread(target=capture_and_track, daemon=True).start()
+
 start_capture()
 
 # ----------------------------------------
+# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
+
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+        )
+
 @app.route('/')
-def index(): return render_template('index.html')
+def index():
+    return render_template('index.html')
+
 @app.route('/video_feed')
 def video_feed():
     resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({'Cache-Control':'no-cache, no-store, must-revalidate','Pragma':'no-cache','Expires':'0'})
+    resp.headers.update({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    })
     return resp
+
 @app.route('/stats')
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
     temp = None
-    try: temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except: pass
+    try:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
+        pass
     try:
         out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except: sig = None
-    with fps_lock: fps = round(current_fps, 1)
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig, fps=fps)
+    except:
+        sig = None
+    with fps_lock:
+        fps = round(current_fps, 1)
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem,
+        temperature_c=temp,
+        wifi_signal_dbm=sig,
+        fps=fps
+    )
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
