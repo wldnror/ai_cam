@@ -135,9 +135,9 @@ except Exception as e:
 # 4) OpenCV 트래커 생성 함수
 def create_tracker():
     try:
-        return cv2.TrackerMOSSE_create()  # 빠른 모드
+        return cv2.TrackerMOSSE_create()
     except AttributeError:
-        return cv2.TrackerCSRT_create()  # 정확도 우선 모드
+        return cv2.TrackerCSRT_create()
 
 # ----------------------------------------
 # 5) 프레임 처리 (검출 + 트래킹) 및 FPS 계산
@@ -216,7 +216,7 @@ app = Flask(__name__)
 def generate():
     while True:
         frame = frame_queue.get()
-        yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
 
 @app.route('/')
 def index():
