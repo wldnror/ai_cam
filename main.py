@@ -61,13 +61,12 @@ from utils.torch_utils import select_device
 
 device = select_device('cpu')
 
-# 단일 모델 로드 설정: 온도 기반 스위치 기능 제거
+# 단일 모델 로드 설정
 MODEL_NAME = "yolov5n.pt"
 backend = None
 model = None
 
 def load_model(weights_name):
-    """주어진 가중치 파일로 모델 로드"""
     global backend, model
     weights_path = os.path.join(YOLOROOT, weights_name)
     if not os.path.exists(weights_path):
@@ -134,16 +133,44 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 프레임 처리 (동기식 파이프라인) 및 FPS 계산
+# 4) 객체 검출 + 트래킹 기반 프레임 처리
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
 
-def capture_and_process():
+def create_tracker():
+    # 다양한 OpenCV 트래커 생성자 시도 목록
+    constructors = [
+        ('cv2', 'TrackerMOSSE_create'),
+        ('cv2.legacy', 'TrackerMOSSE_create'),
+        ('cv2.legacy', 'TrackerCSRT_create'),
+        ('cv2', 'TrackerCSRT_create'),
+        ('cv2.legacy', 'TrackerKCF_create'),
+        ('cv2', 'TrackerKCF_create'),
+        ('cv2.legacy', 'TrackerMIL_create'),
+        ('cv2', 'TrackerMIL_create')
+    ]
+    for module_name, func_name in constructors:
+        try:
+            module = cv2
+            if module_name == 'cv2.legacy' and hasattr(cv2, 'legacy'):
+                module = cv2.legacy
+            tracker_fn = getattr(module, func_name, None)
+            if tracker_fn:
+                return tracker_fn()
+        except Exception:
+            continue
+    raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
+
+def capture_and_track():
     global current_fps
     fps = 10
     interval = 1.0 / fps
     target_size = 270
+
+    detection_interval = 5  # N 프레임마다 검출
+    frame_count = 0
+    trackers = []  # (tracker, label)
 
     while True:
         start = time.time()
@@ -151,52 +178,59 @@ def capture_and_process():
         if not ret:
             continue
 
-        # 객체 검출
-        with torch.no_grad():
-            results = model(frame, size=target_size)
-
-        # 검출된 박스 수집
+        frame_count += 1
         boxes = []
-        for *box, conf, cls in results.xyxy[0]:
-            label = results.names[int(cls)]
-            if label not in label_map:
-                continue
-            x1, y1, x2, y2 = map(int, box)
-            boxes.append((x1, y1, x2, y2, label, float(conf)))
+
+        if frame_count % detection_interval == 0:
+            trackers.clear()
+            with torch.no_grad():
+                results = model(frame, size=target_size)
+            for *box, conf, cls in results.xyxy[0]:
+                label = results.names[int(cls)]
+                if label not in label_map:
+                    continue
+                x1, y1, x2, y2 = map(int, box)
+                boxes.append((x1, y1, x2, y2, label, float(conf)))
+                tracker = create_tracker()
+                tracker.init(frame, (x1, y1, x2-x1, y2-y1))
+                trackers.append((tracker, label))
+        else:
+            new_boxes = []
+            for tracker, label in trackers:
+                success, bbox = tracker.update(frame)
+                if success:
+                    x, y, w, h = map(int, bbox)
+                    new_boxes.append((x, y, x+w, y+h, label, None))
+            boxes = new_boxes
 
         # 박스 그리기
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-        # 텍스트 오버레이
-        img_pil = Image.fromarray(frame[:, :, ::-1])
-        draw = ImageDraw.Draw(img_pil)
-        for x1, y1, x2, y2, label, conf in boxes:
-            text = f"{label_map[label]} {conf*100:.1f}%"
+            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
+            img_pil = Image.fromarray(frame[:, :, ::-1])
+            draw = ImageDraw.Draw(img_pil)
             size = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0, 0, 0))
-            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
-        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
+            frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # JPEG 인코딩
+        # 인코딩 및 큐 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-
-        # 큐 관리
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # FPS 계산 및 저장
+        # FPS 계산
         elapsed = time.time() - start
         instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
         with fps_lock:
             current_fps = instant_fps
 
-        # 주기 조절
         time.sleep(max(0, interval - elapsed))
 
-threading.Thread(target=capture_and_process, daemon=True).start()
+# 트래킹 스레드 시작
+threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
 # 5) Flask 앱 및 엔드포인트
@@ -207,9 +241,7 @@ def generate():
         frame = frame_queue.get()
         yield (
             b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n'
-            + frame +
-            b'\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
         )
 
 @app.route('/')
@@ -232,18 +264,16 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
         pass
     try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except Exception:
+    except:
         sig = None
-
     with fps_lock:
         fps = round(current_fps, 1)
-
     return jsonify(
         camera=1,
         cpu_percent=cpu,
