@@ -136,12 +136,19 @@ detection_executor = ThreadPoolExecutor(max_workers=1)
 tracking_executor = ThreadPoolExecutor(max_workers=n_cpu)
 
 def create_tracker():
-    # CSRT 트래커 생성: 모듈 위치에 따라 분기
-    if hasattr(cv2, 'TrackerCSRT_create'):
-        return cv2.TrackerCSRT_create()
-    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
-        return cv2.legacy.TrackerCSRT_create()
-    raise RuntimeError('CSRT Tracker 생성 불가: OpenCV contrib 모듈이 필요합니다.')
+    # CSRT 시도
+    for mod in [cv2, getattr(cv2, 'legacy', None)]:
+        if hasattr(mod, 'TrackerCSRT_create'):
+            return getattr(mod, 'TrackerCSRT_create')()
+    # CSRT 없으면 KCF 폴백
+    for mod in [cv2, getattr(cv2, 'legacy', None)]:
+        if hasattr(mod, 'TrackerKCF_create'):
+            return getattr(mod, 'TrackerKCF_create')()
+    # MOSSE 폴백
+    for mod in [cv2, getattr(cv2, 'legacy', None)]:
+        if hasattr(mod, 'TrackerMOSSE_create'):
+            return getattr(mod, 'TrackerMOSSE_create')()
+    raise RuntimeError('사용 가능한 트래커 생성 불가: contrib 없이 MOSSE/KCF/CSRT 중 하나 필요')
 
 def track_update(tracker, label, frame):
     success, bbox = tracker.update(frame)
@@ -150,7 +157,7 @@ def track_update(tracker, label, frame):
 def capture_and_track():
     global current_fps
     target_size = 360
-    detection_interval = 10  # 검출 빈도를 줄이고 싶다면 이 값을 올리세요.
+    detection_interval = 10  # 조정 가능
     frame_count = 0
     trackers = []
 
@@ -170,9 +177,9 @@ def capture_and_track():
                 label = results.names[int(cls)]
                 if label not in label_map: continue
                 x1, y1, x2, y2 = box
-                scale_x = full_frame.shape[1] / target_size
-                scale_y = full_frame.shape[0] / target_size
-                x1, y1, x2, y2 = map(int, [x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y])
+                sx = full_frame.shape[1] / target_size
+                sy = full_frame.shape[0] / target_size
+                x1, y1, x2, y2 = map(int, [x1*sx, y1*sy, x2*sx, y2*sy])
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((trk, label))
@@ -181,86 +188,53 @@ def capture_and_track():
             futures = [tracking_executor.submit(track_update, trk, lbl, full_frame) for trk, lbl in trackers]
             new_boxes = []
             for fut in futures:
-                success, bbox, label = fut.result()
-                if not success: continue
+                ok, bbox, label = fut.result()
+                if not ok: continue
                 x, y, w, h = map(int, bbox)
                 new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
+        # Draw & enqueue
         for x1, y1, x2, y2, label, conf in boxes:
-            color = (255,0,0) if label=='person' else (0,0,255)
-            cv2.rectangle(full_frame, (x1,y1), (x2,y2), color, 2)
-            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
-            img_pil = Image.fromarray(full_frame[:,:,::-1])
-            draw = ImageDraw.Draw(img_pil)
-            w_txt, h_txt = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
-            full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            col = (255,0,0) if label=='person' else (0,0,255)
+            cv2.rectangle(full_frame, (x1,y1), (x2,y2), col, 2)
+            text = f"{label_map[label]} {conf*100:.1f}%" if conf else f"{label_map[label]} (추적됨)"
+            pil = Image.fromarray(full_frame[:,:,::-1])
+            draw = ImageDraw.Draw(pil)
+            wt, ht = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-ht-4, x1+wt+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-ht-2), text, font=font, fill=(255,255,255))
+            full_frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
         _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
         if not frame_queue.empty(): frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        elapsed = time.time() - start
         with fps_lock:
-            current_fps = 1.0/elapsed if elapsed>0 else 0.0
-
+            current_fps = 1.0 / max(time.time() - start, 1e-6)
         time.sleep(0.001)
 
-# start capture thread
+# 시작
 threading.Thread(target=capture_and_track, daemon=True).start()
-
-# ----------------------------------------
-# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
     while True:
-        frame = frame_queue.get()
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
-        )
+        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_queue.get() + b'\r\n')
 
 @app.route('/')
-def index():
-    return render_template('index.html')
-
+def index(): return render_template('index.html')
 @app.route('/video_feed')
-def video_feed():
-    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-    resp.headers.update({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    })
-    return resp
-
+def video_feed(): return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 @app.route('/stats')
 def stats():
-    cpu = psutil.cpu_percent(interval=0.5)
-    mem = psutil.virtual_memory().percent
-    temp = None
-    try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
-    except:
-        pass
-    try:
-        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
-        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except:
-        sig = None
-    with fps_lock:
-        fps = round(current_fps, 1)
-    return jsonify(
-        camera=1,
-        cpu_percent=cpu,
-        memory_percent=mem,
-        temperature_c=temp,
-        wifi_signal_dbm=sig,
-        fps=fps
-    )
+    cpu=psutil.cpu_percent(0.5); mem=psutil.virtual_memory().percent
+    try: temp=float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000
+    except: temp=None
+    try: sig=int([s.split('=')[1] for s in subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode().split() if s.startswith('level=')][0])
+    except: sig=None
+    with fps_lock: fps=round(current_fps,1)
+    return jsonify(camera=1,cpu_percent=cpu,memory_percent=mem,temperature_c=temp,wifi_signal_dbm=sig,fps=fps)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=5000)
