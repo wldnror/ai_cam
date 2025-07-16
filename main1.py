@@ -139,28 +139,11 @@ current_fps = 0.0
 fps_lock = threading.Lock()
 
 def create_tracker():
-    # 다양한 OpenCV 트래커 생성자 시도 목록
-    constructors = [
-        ('cv2', 'TrackerMOSSE_create'),
-        ('cv2.legacy', 'TrackerMOSSE_create'),
-        ('cv2.legacy', 'TrackerCSRT_create'),
-        ('cv2', 'TrackerCSRT_create'),
-        ('cv2.legacy', 'TrackerKCF_create'),
-        ('cv2', 'TrackerKCF_create'),
-        ('cv2.legacy', 'TrackerMIL_create'),
-        ('cv2', 'TrackerMIL_create')
-    ]
-    for module_name, func_name in constructors:
-        try:
-            module = cv2
-            if module_name == 'cv2.legacy' and hasattr(cv2, 'legacy'):
-                module = cv2.legacy
-            tracker_fn = getattr(module, func_name, None)
-            if tracker_fn:
-                return tracker_fn()
-        except Exception:
-            continue
-    raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
+    # CSRT 트래커만 사용 (정확도 우선)
+    if hasattr(cv2.legacy, 'TrackerCSRT_create'):
+        return cv2.legacy.TrackerCSRT_create()
+    else:
+        return cv2.TrackerCSRT_create()
 
 def capture_and_track():
     global current_fps
@@ -168,7 +151,7 @@ def capture_and_track():
     interval = 1.0 / fps
     target_size = 270
 
-    detection_interval = 5  # N 프레임마다 검출
+    detection_interval = 3  # N 프레임마다 검출 (기존 5→3)
     frame_count = 0
     trackers = []  # (tracker, label)
 
@@ -181,7 +164,8 @@ def capture_and_track():
         frame_count += 1
         boxes = []
 
-        if frame_count % detection_interval == 0:
+        # 검출 주기 도달 또는 추적 중인 객체가 없으면 재검출
+        if frame_count % detection_interval == 0 or not trackers:
             trackers.clear()
             with torch.no_grad():
                 results = model(frame, size=target_size)
@@ -190,18 +174,23 @@ def capture_and_track():
                 if label not in label_map:
                     continue
                 x1, y1, x2, y2 = map(int, box)
-                boxes.append((x1, y1, x2, y2, label, float(conf)))
                 tracker = create_tracker()
                 tracker.init(frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((tracker, label))
+                boxes.append((x1, y1, x2, y2, label, float(conf)))
         else:
-            new_boxes = []
+            alive = []
             for tracker, label in trackers:
                 success, bbox = tracker.update(frame)
                 if success:
                     x, y, w, h = map(int, bbox)
-                    new_boxes.append((x, y, x+w, y+h, label, None))
-            boxes = new_boxes
+                    boxes.append((x, y, x+w, y+h, label, None))
+                    alive.append((tracker, label))
+                else:
+                    # 트래커 실패 시 즉시 재검출 유도
+                    alive = []
+                    break
+            trackers = alive
 
         # 박스 그리기
         for x1, y1, x2, y2, label, conf in boxes:
@@ -210,9 +199,9 @@ def capture_and_track():
             text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
             img_pil = Image.fromarray(frame[:, :, ::-1])
             draw = ImageDraw.Draw(img_pil)
-            size = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
+            w, h = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-h-4, x1+w+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-h-2), text, font=font, fill=(255,255,255))
             frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
         # 인코딩 및 큐 저장
@@ -223,9 +212,8 @@ def capture_and_track():
 
         # FPS 계산
         elapsed = time.time() - start
-        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
         with fps_lock:
-            current_fps = instant_fps
+            current_fps = 1.0 / elapsed if elapsed > 0 else 0.0
 
         time.sleep(max(0, interval - elapsed))
 
@@ -264,7 +252,7 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except:
         pass
     try:
