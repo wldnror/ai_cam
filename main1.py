@@ -20,6 +20,7 @@ import psutil
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
+from concurrent.futures import ThreadPoolExecutor
 
 # ----------------------------------------
 # 0) 한글 폰트 설치 확인 및 로드
@@ -49,8 +50,10 @@ except Exception:
 
 # ----------------------------------------
 # 2) PyTorch 스레드 수 & YOLOv5 모델 로드
-torch.set_num_threads(8)
-torch.set_num_interop_threads(8)
+import multiprocessing
+n_cpu = multiprocessing.cpu_count()
+torch.set_num_threads(n_cpu)
+torch.set_num_interop_threads(n_cpu)
 
 YOLOROOT = os.path.expanduser('~/yolov5')
 if not os.path.isdir(YOLOROOT):
@@ -61,7 +64,6 @@ from utils.torch_utils import select_device
 
 device = select_device('cpu')
 
-# 단일 모델 로드 설정
 MODEL_NAME = "yolov5s.pt"
 backend = None
 model = None
@@ -79,10 +81,8 @@ def load_model(weights_name):
     model = AutoShape(backend.model)
     print(f"[MODEL] Loaded {weights_name}")
 
-# 시작 시 모델 로드
 load_model(MODEL_NAME)
 
-# 한글 레이블 매핑
 label_map = {'person': '사람', 'car': '자동차'}
 
 # ----------------------------------------
@@ -139,7 +139,6 @@ current_fps = 0.0
 fps_lock = threading.Lock()
 
 def create_tracker():
-    # 다양한 OpenCV 트래커 생성자 시도 목록
     constructors = [
         ('cv2', 'TrackerMOSSE_create'),
         ('cv2.legacy', 'TrackerMOSSE_create'),
@@ -164,13 +163,11 @@ def create_tracker():
 
 def capture_and_track():
     global current_fps
-    fps = 10
-    interval = 1.0 / fps
-    target_size = 270
-
-    detection_interval = 5  # N 프레임마다 검출
+    target_size = 360
+    detection_interval = 5
     frame_count = 0
-    trackers = []  # (tracker, label)
+    trackers = []
+    executor = ThreadPoolExecutor(max_workers=1)
 
     while True:
         start = time.time()
@@ -179,57 +176,74 @@ def capture_and_track():
             continue
 
         frame_count += 1
+        full_frame = frame
         boxes = []
 
         if frame_count % detection_interval == 0:
+            # clear trackers
             trackers.clear()
-            with torch.no_grad():
-                results = model(frame, size=target_size)
+
+            # resize & async detect
+            small = cv2.resize(full_frame, (target_size, target_size))
+            future = executor.submit(lambda img: model(img, size=target_size), small)
+            results = future.result()
+
             for *box, conf, cls in results.xyxy[0]:
                 label = results.names[int(cls)]
                 if label not in label_map:
                     continue
-                x1, y1, x2, y2 = map(int, box)
+                x1, y1, x2, y2 = box
+                scale_x = full_frame.shape[1] / target_size
+                scale_y = full_frame.shape[0] / target_size
+                x1 = int(x1 * scale_x); y1 = int(y1 * scale_y)
+                x2 = int(x2 * scale_x); y2 = int(y2 * scale_y)
+
+                # init tracker on full_frame
+                trk = create_tracker()
+                trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
+                trackers.append((trk, label))
                 boxes.append((x1, y1, x2, y2, label, float(conf)))
-                tracker = create_tracker()
-                tracker.init(frame, (x1, y1, x2-x1, y2-y1))
-                trackers.append((tracker, label))
+
         else:
+            # tracking only
             new_boxes = []
-            for tracker, label in trackers:
-                success, bbox = tracker.update(frame)
-                if success:
-                    x, y, w, h = map(int, bbox)
-                    new_boxes.append((x, y, x+w, y+h, label, None))
+            for trk, label in trackers:
+                success, bbox = trk.update(full_frame)
+                if not success:
+                    continue
+                x, y, w, h = map(int, bbox)
+                new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
-        # 박스 그리기
+        # draw boxes
         for x1, y1, x2, y2, label, conf in boxes:
-            color = (255, 0, 0) if label == 'person' else (0, 0, 255)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
-            img_pil = Image.fromarray(frame[:, :, ::-1])
+            color = (255,0,0) if label=='person' else (0,0,255)
+            cv2.rectangle(full_frame, (x1,y1), (x2,y2), color, 2)
+            text = (
+                f"{label_map[label]} {conf*100:.1f}%"
+                if conf is not None else f"{label_map[label]} (추적됨)"
+            )
+            img_pil = Image.fromarray(full_frame[:,:,::-1])
             draw = ImageDraw.Draw(img_pil)
-            size = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
-            frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            w_txt, h_txt = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
+            full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # 인코딩 및 큐 저장
-        _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        # encode & enqueue
+        _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # FPS 계산
+        # update fps
         elapsed = time.time() - start
-        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
         with fps_lock:
-            current_fps = instant_fps
+            current_fps = 1.0/elapsed if elapsed>0 else 0.0
 
-        time.sleep(max(0, interval - elapsed))
+        # minimize sleep
+        time.sleep(0.001)
 
-# 트래킹 스레드 시작
 threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
