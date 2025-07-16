@@ -137,11 +137,12 @@ current_fps = 0.0
 fps_lock = threading.Lock()
 
 # ThreadPoolExecutors for detection and tracking
-max_workers_track = n_cpu
-max_workers_detect = 1
+
+max_workers_detect = max(1, n_cpu // 2)    # 4코어 → 2 쓰레드
+max_workers_track  = n_cpu - max_workers_detect  # 4 – 2 → 2 쓰레드
 
 detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
-tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
+tracking_executor  = ThreadPoolExecutor(max_workers=max_workers_track)
 
 def create_tracker():
     constructors = [
