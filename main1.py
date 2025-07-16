@@ -110,13 +110,11 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
-                for _ in range(5):
-                    cap.read()
+                for _ in range(5): cap.read()
                 self.cap = cap
                 break
         if not self.cap:
             raise RuntimeError("사용 가능한 USB 웹캠이 없습니다.")
-
     def read(self):
         return self.cap.read()
 
@@ -138,8 +136,12 @@ detection_executor = ThreadPoolExecutor(max_workers=1)
 tracking_executor = ThreadPoolExecutor(max_workers=n_cpu)
 
 def create_tracker():
-    # CSRT 트래커만 사용
-    return cv2.legacy.TrackerCSRT_create()
+    # CSRT 트래커 생성: 모듈 위치에 따라 분기
+    if hasattr(cv2, 'TrackerCSRT_create'):
+        return cv2.TrackerCSRT_create()
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+        return cv2.legacy.TrackerCSRT_create()
+    raise RuntimeError('CSRT Tracker 생성 불가: OpenCV contrib 모듈이 필요합니다.')
 
 def track_update(tracker, label, frame):
     success, bbox = tracker.update(frame)
@@ -148,16 +150,14 @@ def track_update(tracker, label, frame):
 def capture_and_track():
     global current_fps
     target_size = 360
-    detection_interval = 10  # 조정 가능: 5→10으로 늘려도 됩니다
+    detection_interval = 10  # 검출 빈도를 줄이고 싶다면 이 값을 올리세요.
     frame_count = 0
     trackers = []
 
     while True:
         start = time.time()
         ret, frame = camera.read()
-        if not ret:
-            continue
-
+        if not ret: continue
         frame_count += 1
         full_frame = frame.copy()
         boxes = []
@@ -166,16 +166,13 @@ def capture_and_track():
             trackers.clear()
             small = cv2.resize(full_frame, (target_size, target_size))
             results = detection_executor.submit(lambda img: model(img, size=target_size), small).result()
-
             for *box, conf, cls in results.xyxy[0]:
                 label = results.names[int(cls)]
-                if label not in label_map:
-                    continue
+                if label not in label_map: continue
                 x1, y1, x2, y2 = box
                 scale_x = full_frame.shape[1] / target_size
                 scale_y = full_frame.shape[0] / target_size
                 x1, y1, x2, y2 = map(int, [x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y])
-
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((trk, label))
@@ -185,8 +182,7 @@ def capture_and_track():
             new_boxes = []
             for fut in futures:
                 success, bbox, label = fut.result()
-                if not success:
-                    continue
+                if not success: continue
                 x, y, w, h = map(int, bbox)
                 new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
@@ -203,8 +199,7 @@ def capture_and_track():
             full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
         _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
-        if not frame_queue.empty():
-            frame_queue.get_nowait()
+        if not frame_queue.empty(): frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
         elapsed = time.time() - start
