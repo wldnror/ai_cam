@@ -90,7 +90,7 @@ class CSICamera:
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (720, 480)}, lores={"size": (400, 400)}, buffer_count=6
+            main={"size": (720, 480)}, lores={"size": (640, 360)}, buffer_count=6
         )
         self.picam2.configure(cfg)
         self.picam2.start()
