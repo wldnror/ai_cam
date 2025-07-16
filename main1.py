@@ -174,7 +174,8 @@ def capture_and_track():
     target_size = 360
     detection_interval = 5
     frame_count = 0
-    trackers = []
+    # tracker와 마지막 검출 confidence를 함께 저장
+    trackers = []  # [(tracker, label, last_conf)]
 
     while True:
         start = time.time()
@@ -187,7 +188,7 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
-            trackers.clear()
+            trackers = []
             small = cv2.resize(full_frame, (target_size, target_size))
             results = detection_executor.submit(lambda img: model(img, size=target_size), small).result()
             for *box, conf, cls in results.xyxy[0]:
@@ -200,30 +201,38 @@ def capture_and_track():
                 x1, y1, x2, y2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
-                trackers.append((trk, lbl))
+                trackers.append((trk, lbl, float(conf)))
                 boxes.append((x1, y1, x2, y2, lbl, float(conf)))
         else:
-            futures = [tracking_executor.submit(track_update, trk, lbl, full_frame)
-                       for trk, lbl in trackers]
+            # 트래킹 업데이트와 index 동시 관리
+            futures = [
+                (tracking_executor.submit(track_update, trk, lbl, full_frame), idx)
+                for idx, (trk, lbl, last_conf) in enumerate(trackers)
+            ]
             new_boxes = []
-            for fut in futures:
+            for fut, idx in futures:
                 ok, bbox, lbl = fut.result()
                 if not ok:
                     continue
                 x, y, w, h = map(int, bbox)
-                new_boxes.append((x, y, x+w, y+h, lbl, None))
+                # 이전 마지막 confidence 가져오기
+                last_conf = trackers[idx][2]
+                new_boxes.append((x, y, x+w, y+h, lbl, last_conf))
+                # trackers에도 confidence 유지
+                trackers[idx] = (trackers[idx][0], lbl, last_conf)
             boxes = new_boxes
 
         # --- 애노테이션: PIL 변환/드로우를 프레임당 1회만 수행 ---
         img_pil = Image.fromarray(full_frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
         for x1, y1, x2, y2, lbl, conf in boxes:
-            color = (255,0,0) if lbl=='person' else (0,0,255)
+            color = (255, 0, 0) if lbl == 'person' else (0, 0, 255)
             draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-            text = label_map[lbl]  # 라벨만 표시
+            # 항상 마지막 confidence로 % 표시
+            text = f"{label_map[lbl]} {conf*100:.1f}%"
             w_txt, h_txt = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
+            draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0, 0, 0))
+            draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255, 255, 255))
         full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
         # ------------------------------------------------------------
 
