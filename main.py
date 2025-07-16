@@ -61,6 +61,7 @@ from utils.torch_utils import select_device
 
 device = select_device('cpu')
 
+# 단일 모델 로드 설정
 MODEL_NAME = "yolov5n.pt"
 backend = None
 model = None
@@ -78,7 +79,10 @@ def load_model(weights_name):
     model = AutoShape(backend.model)
     print(f"[MODEL] Loaded {weights_name}")
 
+# 시작 시 모델 로드
 load_model(MODEL_NAME)
+
+# 한글 레이블 매핑
 label_map = {'person': '사람', 'car': '자동차'}
 
 # ----------------------------------------
@@ -110,7 +114,8 @@ class USBCamera:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
-                for _ in range(5): cap.read()
+                for _ in range(5):
+                    cap.read()
                 self.cap = cap
                 break
         if not self.cap:
@@ -128,27 +133,24 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) OpenCV 트래커 생성 함수
-def create_tracker():
-    try:
-        return cv2.TrackerMOSSE_create()
-    except AttributeError:
-        return cv2.TrackerCSRT_create()
-
-# ----------------------------------------
-# 5) 프레임 처리 (검출 + 트래킹) 및 FPS 계산
+# 4) 객체 검출 + 트래킹 기반 프레임 처리
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
+
+def create_tracker():
+    # 경량 트래커로 MOSSE 사용 (빠름). 정확도가 더 필요하면 CSRT로 변경하세요.
+    return cv2.TrackerMOSSE_create()
 
 def capture_and_track():
     global current_fps
     fps = 10
     interval = 1.0 / fps
     target_size = 270
-    detection_interval = 5
+
+    detection_interval = 5  # N 프레임마다 모델 검출 수행
     frame_count = 0
-    trackers = []
+    trackers = []  # (tracker, label) 리스트
 
     while True:
         start = time.time()
@@ -160,6 +162,7 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
+            # 초기화 전 프레임 로드 비동기화 대기
             trackers.clear()
             with torch.no_grad():
                 results = model(frame, size=target_size)
@@ -173,6 +176,7 @@ def capture_and_track():
                 tracker.init(frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((tracker, label))
         else:
+            # 트래커로 위치만 업데이트
             new_boxes = []
             for tracker, label in trackers:
                 success, bbox = tracker.update(frame)
@@ -181,42 +185,47 @@ def capture_and_track():
                     new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
+        # 박스 그리기 및 텍스트
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (Tracked)"
+            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
             img_pil = Image.fromarray(frame[:, :, ::-1])
             draw = ImageDraw.Draw(img_pil)
             size = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0, 0, 0))
-            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
+            draw.rectangle([x1, y1-size[1]-4, x1+size[0]+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
             frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
+        # JPEG 인코딩 후 큐에 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
+        # FPS 계산 및 저장
         elapsed = time.time() - start
-        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+        instant_fps = 1.0/elapsed if elapsed>0 else 0.0
         with fps_lock:
             current_fps = instant_fps
 
-        time.sleep(max(0, interval - elapsed))
+        # 다음 프레임까지 대기
+        time.sleep(max(0, interval-elapsed))
 
+# 트래킹 스레드 시작
 threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
-# 6) Flask 앱 및 엔드포인트
+# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
-# <-- 여기만 완전히 교체되었습니다! -->
 def generate():
-    boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
     while True:
         frame = frame_queue.get()
-        yield boundary + frame + b"\r\n"
-# <-- 끝 -->
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+        )
 
 @app.route('/')
 def index():
@@ -224,8 +233,7 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
@@ -239,23 +247,23 @@ def stats():
     mem = psutil.virtual_memory().percent
     temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
-    except Exception:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
         pass
     try:
-        out = subprocess.check_output(['iwconfig', 'wlan0'], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
-    except Exception:
+    except:
         sig = None
     with fps_lock:
-        fps_val = round(current_fps, 1)
+        fps = round(current_fps, 1)
     return jsonify(
         camera=1,
         cpu_percent=cpu,
         memory_percent=mem,
         temperature_c=temp,
         wifi_signal_dbm=sig,
-        fps=fps_val
+        fps=fps
     )
 
 if __name__ == '__main__':
