@@ -139,8 +139,16 @@ current_fps = 0.0
 fps_lock = threading.Lock()
 
 def create_tracker():
-    # 경량 트래커로 MOSSE 사용 (빠름). 정확도가 더 필요하면 CSRT로 변경하세요.
-    return cv2.TrackerMOSSE_create()
+    # OpenCV 버전에 따라 MOSSE 트래커 생성
+    if hasattr(cv2, 'TrackerMOSSE_create'):
+        return cv2.TrackerMOSSE_create()
+    # legacy 모듈 사용
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerMOSSE_create'):
+        return cv2.legacy.TrackerMOSSE_create()
+    # MOSSE 미지원 시 CSRT로 대체
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+        return cv2.legacy.TrackerCSRT_create()
+    return cv2.TrackerCSRT_create()
 
 def capture_and_track():
     global current_fps
@@ -162,7 +170,6 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
-            # 초기화 전 프레임 로드 비동기화 대기
             trackers.clear()
             with torch.no_grad():
                 results = model(frame, size=target_size)
@@ -176,7 +183,6 @@ def capture_and_track():
                 tracker.init(frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((tracker, label))
         else:
-            # 트래커로 위치만 업데이트
             new_boxes = []
             for tracker, label in trackers:
                 success, bbox = tracker.update(frame)
@@ -185,7 +191,6 @@ def capture_and_track():
                     new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
-        # 박스 그리기 및 텍스트
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -197,22 +202,18 @@ def capture_and_track():
             draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
             frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # JPEG 인코딩 후 큐에 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # FPS 계산 및 저장
         elapsed = time.time() - start
         instant_fps = 1.0/elapsed if elapsed>0 else 0.0
         with fps_lock:
             current_fps = instant_fps
 
-        # 다음 프레임까지 대기
         time.sleep(max(0, interval-elapsed))
 
-# 트래킹 스레드 시작
 threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
@@ -223,15 +224,17 @@ def generate():
     while True:
         frame = frame_queue.get()
         yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
         )
 
 @app.route('/')
+
 def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
+
 def video_feed():
     resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
@@ -242,6 +245,7 @@ def video_feed():
     return resp
 
 @app.route('/stats')
+
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
