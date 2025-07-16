@@ -139,18 +139,28 @@ current_fps = 0.0
 fps_lock = threading.Lock()
 
 def create_tracker():
-    # OpenCV 버전에 따라 MOSSE 트래커 생성
-    if hasattr(cv2, 'TrackerMOSSE_create'):
+    # OpenCV MOSSE 트래커 먼저 시도
+    try:
         return cv2.TrackerMOSSE_create()
-    # legacy 모듈 사용
-    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerMOSSE_create'):
+    except AttributeError:
+        pass
+    # legacy 모듈의 MOSSE 트래커
+    try:
         return cv2.legacy.TrackerMOSSE_create()
-    # MOSSE 미지원 시 CSRT로 대체
-    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+    except AttributeError:
+        pass
+    # CSRT 트래커 시도
+    try:
         return cv2.legacy.TrackerCSRT_create()
-    return cv2.TrackerCSRT_create()
+    except AttributeError:
+        pass
+    try:
+        return cv2.TrackerCSRT_create()
+    except AttributeError:
+        pass
+    raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
 
-def capture_and_track():
+def capture_and_track():():
     global current_fps
     fps = 10
     interval = 1.0 / fps
