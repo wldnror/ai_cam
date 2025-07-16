@@ -61,7 +61,6 @@ from utils.torch_utils import select_device
 
 device = select_device('cpu')
 
-# 단일 모델 로드 설정
 MODEL_NAME = "yolov5n.pt"
 backend = None
 model = None
@@ -79,10 +78,7 @@ def load_model(weights_name):
     model = AutoShape(backend.model)
     print(f"[MODEL] Loaded {weights_name}")
 
-# 시작 시 모델 로드
 load_model(MODEL_NAME)
-
-# 한글 레이블 매핑
 label_map = {'person': '사람', 'car': '자동차'}
 
 # ----------------------------------------
@@ -150,9 +146,9 @@ def capture_and_track():
     fps = 10
     interval = 1.0 / fps
     target_size = 270
-    detection_interval = 5  # N 프레임마다 검출 수행
+    detection_interval = 5
     frame_count = 0
-    trackers = []  # (tracker, label)
+    trackers = []
 
     while True:
         start = time.time()
@@ -197,7 +193,8 @@ def capture_and_track():
             frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
-        if not frame_queue.empty(): frame_queue.get_nowait()
+        if not frame_queue.empty():
+            frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
         elapsed = time.time() - start
@@ -213,15 +210,13 @@ threading.Thread(target=capture_and_track, daemon=True).start()
 # 6) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
+# <-- 여기만 완전히 교체되었습니다! -->
 def generate():
+    boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
     while True:
         frame = frame_queue.get()
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n"
-            + frame
-            + b"\r\n"
-        )
+        yield boundary + frame + b"\r\n"
+# <-- 끝 -->
 
 @app.route('/')
 def index():
@@ -229,7 +224,8 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
-    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp = Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers.update({
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
