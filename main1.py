@@ -18,17 +18,24 @@ import cv2
 import torch
 import psutil
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 
 # ----------------------------------------
-# 0) 한글 프리타입 모듈 초기화
-#    (opencv-contrib-python 설치 필요)
+# 0) 한글 폰트 설치 확인 및 로드
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-from cv2 import freetype
-ft = freetype.createFreeType2()
-ft.loadFontData(fontFileName=FONT_PATH, id=0)
+if not os.path.exists(FONT_PATH):
+    try:
+        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
+        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
+    except Exception as e:
+        print(f"폰트 설치 실패: {e}")
+try:
+    font = ImageFont.truetype(FONT_PATH, 24)
+except Exception:
+    font = ImageFont.load_default()
 
 # ----------------------------------------
 # 1) 화면 절전/DPMS 비활성화
@@ -124,28 +131,7 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 애노테이션 함수 (FreeType2 사용)
-def annotate(frame, boxes):
-    for x1, y1, x2, y2, label, conf in boxes:
-        col = (0, 0, 255) if label=='car' else (255, 0, 0)
-        # 사각형
-        cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
-        # 한글 텍스트
-        text = f"{label_map[label]} {conf*100:.1f}%" if conf else f"{label_map[label]} (추적됨)"
-        ft.putText(
-            img=frame,
-            text=text,
-            org=(x1, y1 - 6),
-            fontHeight=24,
-            color=(255, 255, 255),
-            thickness=1,
-            line_type=cv2.LINE_AA,
-            bottomLeftOrigin=False
-        )
-    return frame
-
-# ----------------------------------------
-# 5) 객체 검출 + 트래킹 기반 프레임 처리
+# 4) 객체 검출 + 트래킹 기반 프레임 처리
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
@@ -208,7 +194,7 @@ def capture_and_track():
                 lbl = results.names[int(cls)]
                 if lbl not in label_map:
                     continue
-                x1, y1, x2, y2 = map(int, [*box])
+                x1, y1, x2, y2 = map(int, box)
                 sx = full_frame.shape[1] / target_size
                 sy = full_frame.shape[0] / target_size
                 x1, y1, x2, y2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
@@ -228,8 +214,18 @@ def capture_and_track():
                 new_boxes.append((x, y, x+w, y+h, lbl, None))
             boxes = new_boxes
 
-        # 애노테이션
-        full_frame = annotate(full_frame, boxes)
+        # --- 애노테이션: PIL 변환/드로우를 프레임당 1회만 수행 ---
+        img_pil = Image.fromarray(full_frame[:, :, ::-1])
+        draw = ImageDraw.Draw(img_pil)
+        for x1, y1, x2, y2, lbl, conf in boxes:
+            color = (255,0,0) if lbl=='person' else (0,0,255)
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+            text = f"{label_map[lbl]} {conf*100:.1f}%" if conf else f"{label_map[lbl]} (추적됨)"
+            w_txt, h_txt = draw.textsize(text, font=font)
+            draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0,0,0))
+            draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
+        full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        # ------------------------------------------------------------
 
         # 인코딩 & 큐
         _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
@@ -243,11 +239,11 @@ def capture_and_track():
 
         time.sleep(0.001)
 
-# 시작
+# start capture thread
 threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
-# 6) Flask 앱 및 엔드포인트
+# 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
@@ -277,7 +273,7 @@ def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
     except:
         temp = None
     try:
