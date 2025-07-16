@@ -21,8 +21,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 0) 한글 폰트 설치 확인 및 자동 설치 (Ubuntu 기반)
+# ----------------------------------------
+# 0) 한글 폰트 설치 확인 및 로드
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
 if not os.path.exists(FONT_PATH):
     try:
@@ -37,7 +37,7 @@ except Exception:
     font = ImageFont.load_default()
     print("한글 폰트를 로드하지 못해 기본 폰트를 사용합니다.")
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 1) 화면 절전/DPMS 비활성화
 try:
     if os.environ.get('DISPLAY'):
@@ -47,7 +47,7 @@ try:
 except Exception:
     pass
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 2) PyTorch 스레드 수 & YOLOv5 모델 로드
 torch.set_num_threads(8)
 torch.set_num_interop_threads(8)
@@ -60,32 +60,40 @@ from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-WEIGHTS = os.path.join(YOLOROOT, 'yolov5n.pt')
-if not os.path.exists(WEIGHTS):
-    torch.hub.download_url_to_file(
-        'https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt', WEIGHTS
-    )
-backend = DetectMultiBackend(WEIGHTS, device=device, fuse=True)
-backend.model.eval()
-model = AutoShape(backend.model)
 
-# ──────────────────────────────────────────────────────────────────────────────
+# 단일 모델 로드 설정: 온도 기반 스위치 기능 제거
+MODEL_NAME = "yolov5n.pt"
+backend = None
+model = None
+
+def load_model(weights_name):
+    """주어진 가중치 파일로 모델 로드"""
+    global backend, model
+    weights_path = os.path.join(YOLOROOT, weights_name)
+    if not os.path.exists(weights_path):
+        torch.hub.download_url_to_file(
+            f'https://github.com/ultralytics/yolov5/releases/download/v7.0/{weights_name}',
+            weights_path
+        )
+    backend = DetectMultiBackend(weights_path, device=device, fuse=True)
+    backend.model.eval()
+    model = AutoShape(backend.model)
+    print(f"[MODEL] Loaded {weights_name}")
+
+# 시작 시 모델 로드
+load_model(MODEL_NAME)
+
 # 한글 레이블 매핑
-label_map = {
-    'person': '사람',
-    'car':    '자동차'
-}
+label_map = {'person': '사람', 'car': '자동차'}
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 3) 카메라 클래스 정의
 class CSICamera:
     def __init__(self):
         from picamera2 import Picamera2
         self.picam2 = Picamera2()
         cfg = self.picam2.create_video_configuration(
-            main={"size": (1280, 720)},
-            lores={"size": (640, 360)},
-            buffer_count=6
+            main={"size": (720, 480)}, lores={"size": (640, 360)}, buffer_count=6
         )
         self.picam2.configure(cfg)
         self.picam2.start()
@@ -104,10 +112,11 @@ class USBCamera:
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
-                for _ in range(5): cap.read()
+                for _ in range(5):
+                    cap.read()
                 self.cap = cap
                 break
         if not self.cap:
@@ -124,38 +133,43 @@ except Exception as e:
     camera = USBCamera()
     print(">>> Using USB webcam")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4) 프레임 처리 (동기식 파이프라인)
+# ----------------------------------------
+# 4) 프레임 처리 (동기식 파이프라인) 및 FPS 계산
 frame_queue = queue.Queue(maxsize=3)
+current_fps = 0.0
+fps_lock = threading.Lock()
 
 def capture_and_process():
-    fps = 5
+    global current_fps
+    fps = 10
     interval = 1.0 / fps
-    target_size = 320
+    target_size = 270
 
     while True:
         start = time.time()
         ret, frame = camera.read()
-        if not ret: continue
+        if not ret:
+            continue
 
-        # 동기 inference
+        # 객체 검출
         with torch.no_grad():
             results = model(frame, size=target_size)
 
-        # 결과 파싱
+        # 검출된 박스 수집
         boxes = []
         for *box, conf, cls in results.xyxy[0]:
             label = results.names[int(cls)]
-            if label not in label_map: continue
+            if label not in label_map:
+                continue
             x1, y1, x2, y2 = map(int, box)
             boxes.append((x1, y1, x2, y2, label, float(conf)))
 
-        # OpenCV로 사각형 그리기
+        # 박스 그리기
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-        # PIL로 한글 텍스트 그리기
+        # 텍스트 오버레이
         img_pil = Image.fromarray(frame[:, :, ::-1])
         draw = ImageDraw.Draw(img_pil)
         for x1, y1, x2, y2, label, conf in boxes:
@@ -165,26 +179,38 @@ def capture_and_process():
             draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255, 255, 255))
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # 인코딩 및 큐 업로드
+        # JPEG 인코딩
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+
+        # 큐 관리
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
+        # FPS 계산 및 저장
         elapsed = time.time() - start
+        instant_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+        with fps_lock:
+            current_fps = instant_fps
+
+        # 주기 조절
         time.sleep(max(0, interval - elapsed))
 
 threading.Thread(target=capture_and_process, daemon=True).start()
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------
 # 5) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
     while True:
         frame = frame_queue.get()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n'
+            + frame +
+            b'\r\n'
+        )
 
 @app.route('/')
 def index():
@@ -214,7 +240,18 @@ def stats():
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
     except Exception:
         sig = None
-    return jsonify(camera=1, cpu_percent=cpu, memory_percent=mem, temperature_c=temp, wifi_signal_dbm=sig)
+
+    with fps_lock:
+        fps = round(current_fps, 1)
+
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem,
+        temperature_c=temp,
+        wifi_signal_dbm=sig,
+        fps=fps
+    )
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
