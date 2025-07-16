@@ -144,11 +144,33 @@ detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
 tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
 
 def create_tracker():
-    # CSRT 트래커를 기본으로 사용
-    if hasattr(cv2, 'legacy'):
-        return cv2.legacy.TrackerCSRT_create()
-    else:
-        return cv2.TrackerCSRT_create()
+    # CSRT 우선 시도, 시스템에 따라 경로가 다를 수 있으므로 다양한 위치를 체크
+    # OpenCV 4.x contrib 모듈 설치 시 cv2.legacy에 구현되어 있음
+    try:
+        # cv2.legacy 네임스페이스 확인
+        if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+            return cv2.legacy.TrackerCSRT_create()
+        # 직접 접근 가능한 경우
+        if hasattr(cv2, 'TrackerCSRT_create'):
+            return cv2.TrackerCSRT_create()
+        # 일부 빌드에서는 cv2.TrackerCSRT.create 형태일 수 있음
+        TrackerCSRT = getattr(cv2, 'TrackerCSRT', None)
+        if TrackerCSRT and hasattr(TrackerCSRT, 'create'):
+            return TrackerCSRT.create()
+    except Exception:
+        pass
+    # CSRT를 사용할 수 없으면 대체 트래커(MOSSE, KCF) 사용
+    for name in ['MOSSE', 'KCF']:
+        # legacy 네임스페이스 우선
+        if hasattr(cv2, 'legacy'):
+            fn = f'Tracker{name}_create'
+            if hasattr(cv2.legacy, fn):
+                return getattr(cv2.legacy, fn)()
+        # 기본 네임스페이스
+        fn = f'Tracker{name}_create'
+        if hasattr(cv2, fn):
+            return getattr(cv2, fn)()
+    raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
 
 # Helper for parallel tracking
 
