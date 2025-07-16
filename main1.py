@@ -144,21 +144,17 @@ detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
 tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
 
 def create_tracker():
-    # CSRT 전용 트래커: legacy 없을 때도 동작하도록 예외 처리
-    try:
-        params = cv2.legacy.TrackerCSRT_Params()
-        params.use_hog = True
-        params.psr_threshold = 0.6
-        return cv2.legacy.TrackerCSRT_create(params)
-    except AttributeError:
-        try:
-            params = cv2.TrackerCSRT_Params()
-            params.use_hog = True
-            params.psr_threshold = 0.6
-            return cv2.TrackerCSRT_create(params)
-        except AttributeError:
-            # 파라미터 없이 기본 생성
-            return cv2.TrackerCSRT_create()
+    # CSRT 생성: legacy 모듈이 없거나 Params 지원이 없을 때 기본 생성만 시도
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
+        return cv2.legacy.TrackerCSRT_create()
+    if hasattr(cv2, 'TrackerCSRT_create'):
+        return cv2.TrackerCSRT_create()
+    # CSRT 미지원 시 MOSSE로 폴백
+    if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerMOSSE_create'):
+        return cv2.legacy.TrackerMOSSE_create()
+    if hasattr(cv2, 'TrackerMOSSE_create'):
+        return cv2.TrackerMOSSE_create()
+    raise RuntimeError("사용 가능한 트래커가 없습니다.")
 
 # Helper for parallel tracking
 def track_update(tracker, label, frame):
