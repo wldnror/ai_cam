@@ -62,7 +62,7 @@ from utils.torch_utils import select_device
 device = select_device('cpu')
 
 # 단일 모델 로드 설정
-MODEL_NAME = "yolov5x.pt"
+MODEL_NAME = "yolov5m.pt"
 backend = None
 model = None
 
