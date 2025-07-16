@@ -61,7 +61,6 @@ from models.common import DetectMultiBackend, AutoShape
 from utils.torch_utils import select_device
 
 device = select_device('cpu')
-
 MODEL_NAME = "yolov5s.pt"
 backend = None
 model = None
@@ -80,7 +79,6 @@ def load_model(weights_name):
     print(f"[MODEL] Loaded {weights_name}")
 
 load_model(MODEL_NAME)
-
 label_map = {'person': '사람', 'car': '자동차'}
 
 # ----------------------------------------
@@ -136,47 +134,21 @@ frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
 
-# ThreadPoolExecutors for detection and tracking
-max_workers_track = n_cpu
-max_workers_detect = 1
-
-detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
-tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
+detection_executor = ThreadPoolExecutor(max_workers=1)
+tracking_executor = ThreadPoolExecutor(max_workers=n_cpu)
 
 def create_tracker():
-    constructors = [
-        ('cv2', 'TrackerMOSSE_create'),
-        ('cv2.legacy', 'TrackerMOSSE_create'),
-        ('cv2.legacy', 'TrackerCSRT_create'),
-        ('cv2', 'TrackerCSRT_create'),
-        ('cv2.legacy', 'TrackerKCF_create'),
-        ('cv2', 'TrackerKCF_create'),
-        ('cv2.legacy', 'TrackerMIL_create'),
-        ('cv2', 'TrackerMIL_create')
-    ]
-    for module_name, func_name in constructors:
-        try:
-            module = cv2
-            if module_name == 'cv2.legacy' and hasattr(cv2, 'legacy'):
-                module = cv2.legacy
-            tracker_fn = getattr(module, func_name, None)
-            if tracker_fn:
-                return tracker_fn()
-        except Exception:
-            continue
-    raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
-
-# Helper for parallel tracking
+    # CSRT 트래커만 사용
+    return cv2.legacy.TrackerCSRT_create()
 
 def track_update(tracker, label, frame):
     success, bbox = tracker.update(frame)
     return success, bbox, label
 
-
 def capture_and_track():
     global current_fps
     target_size = 360
-    detection_interval = 4
+    detection_interval = 10  # 조정 가능: 5→10으로 늘려도 됩니다
     frame_count = 0
     trackers = []
 
@@ -191,12 +163,9 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
-            # detection phase: clear trackers
             trackers.clear()
-
             small = cv2.resize(full_frame, (target_size, target_size))
-            future = detection_executor.submit(lambda img: model(img, size=target_size), small)
-            results = future.result()
+            results = detection_executor.submit(lambda img: model(img, size=target_size), small).result()
 
             for *box, conf, cls in results.xyxy[0]:
                 label = results.names[int(cls)]
@@ -205,33 +174,27 @@ def capture_and_track():
                 x1, y1, x2, y2 = box
                 scale_x = full_frame.shape[1] / target_size
                 scale_y = full_frame.shape[0] / target_size
-                x1 = int(x1 * scale_x); y1 = int(y1 * scale_y)
-                x2 = int(x2 * scale_x); y2 = int(y2 * scale_y)
+                x1, y1, x2, y2 = map(int, [x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y])
 
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((trk, label))
                 boxes.append((x1, y1, x2, y2, label, float(conf)))
         else:
-            # tracking phase: parallel tracker updates
             futures = [tracking_executor.submit(track_update, trk, lbl, full_frame) for trk, lbl in trackers]
             new_boxes = []
-            for future in futures:
-                success, bbox, label = future.result()
+            for fut in futures:
+                success, bbox, label = fut.result()
                 if not success:
                     continue
                 x, y, w, h = map(int, bbox)
                 new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
-        # draw boxes
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255,0,0) if label=='person' else (0,0,255)
             cv2.rectangle(full_frame, (x1,y1), (x2,y2), color, 2)
-            text = (
-                f"{label_map[label]} {conf*100:.1f}%"
-                if conf is not None else f"{label_map[label]} (추적됨)"
-            )
+            text = f"{label_map[label]} {conf*100:.1f}%" if conf is not None else f"{label_map[label]} (추적됨)"
             img_pil = Image.fromarray(full_frame[:,:,::-1])
             draw = ImageDraw.Draw(img_pil)
             w_txt, h_txt = draw.textsize(text, font=font)
@@ -239,13 +202,11 @@ def capture_and_track():
             draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
             full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # encode & enqueue
         _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # update fps
         elapsed = time.time() - start
         with fps_lock:
             current_fps = 1.0/elapsed if elapsed>0 else 0.0
@@ -253,10 +214,7 @@ def capture_and_track():
         time.sleep(0.001)
 
 # start capture thread
-def start_capture():
-    threading.Thread(target=capture_and_track, daemon=True).start()
-
-start_capture()
+threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
 # 5) Flask 앱 및 엔드포인트
