@@ -18,24 +18,17 @@ import cv2
 import torch
 import psutil
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 
 # ----------------------------------------
-# 0) 한글 폰트 설치 확인 및 로드
+# 0) 한글 프리타입 모듈 초기화
+#    (opencv-contrib-python 설치 필요)
 FONT_PATH = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-if not os.path.exists(FONT_PATH):
-    try:
-        subprocess.run(['sudo', 'apt-get', 'update'], check=True)
-        subprocess.run(['sudo', 'apt-get', 'install', '-y', 'fonts-nanum'], check=True)
-    except Exception as e:
-        print(f"폰트 설치 실패: {e}")
-try:
-    font = ImageFont.truetype(FONT_PATH, 24)
-except Exception:
-    font = ImageFont.load_default()
+from cv2 import freetype
+ft = freetype.createFreeType2()
+ft.loadFontData(fontFileName=FONT_PATH, id=0)
 
 # ----------------------------------------
 # 1) 화면 절전/DPMS 비활성화
@@ -131,15 +124,34 @@ except Exception as e:
     print(">>> Using USB webcam")
 
 # ----------------------------------------
-# 4) 객체 검출 + 트래킹 기반 프레임 처리
+# 4) 애노테이션 함수 (FreeType2 사용)
+def annotate(frame, boxes):
+    for x1, y1, x2, y2, label, conf in boxes:
+        col = (0, 0, 255) if label=='car' else (255, 0, 0)
+        # 사각형
+        cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
+        # 한글 텍스트
+        text = f"{label_map[label]} {conf*100:.1f}%" if conf else f"{label_map[label]} (추적됨)"
+        ft.putText(
+            img=frame,
+            text=text,
+            org=(x1, y1 - 6),
+            fontHeight=24,
+            color=(255, 255, 255),
+            thickness=1,
+            line_type=cv2.LINE_AA,
+            bottomLeftOrigin=False
+        )
+    return frame
+
+# ----------------------------------------
+# 5) 객체 검출 + 트래킹 기반 프레임 처리
 frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
 
-# ThreadPoolExecutors for detection and tracking
-
-max_workers_detect = max(1, n_cpu // 2)    # 4코어 → 2 쓰레드
-max_workers_track  = n_cpu - max_workers_detect  # 4 – 2 → 2 쓰레드
+max_workers_detect = max(1, n_cpu // 2)
+max_workers_track  = n_cpu - max_workers_detect
 
 detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
 tracking_executor  = ThreadPoolExecutor(max_workers=max_workers_track)
@@ -160,19 +172,16 @@ def create_tracker():
             module = cv2
             if module_name == 'cv2.legacy' and hasattr(cv2, 'legacy'):
                 module = cv2.legacy
-            tracker_fn = getattr(module, func_name, None)
-            if tracker_fn:
-                return tracker_fn()
+            fn = getattr(module, func_name, None)
+            if fn:
+                return fn()
         except Exception:
             continue
     raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
 
-# Helper for parallel tracking
-
 def track_update(tracker, label, frame):
     success, bbox = tracker.update(frame)
     return success, bbox, label
-
 
 def capture_and_track():
     global current_fps
@@ -192,75 +201,53 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
-            # detection phase: clear trackers
             trackers.clear()
-
             small = cv2.resize(full_frame, (target_size, target_size))
-            future = detection_executor.submit(lambda img: model(img, size=target_size), small)
-            results = future.result()
-
+            results = detection_executor.submit(lambda img: model(img, size=target_size), small).result()
             for *box, conf, cls in results.xyxy[0]:
-                label = results.names[int(cls)]
-                if label not in label_map:
+                lbl = results.names[int(cls)]
+                if lbl not in label_map:
                     continue
-                x1, y1, x2, y2 = box
-                scale_x = full_frame.shape[1] / target_size
-                scale_y = full_frame.shape[0] / target_size
-                x1 = int(x1 * scale_x); y1 = int(y1 * scale_y)
-                x2 = int(x2 * scale_x); y2 = int(y2 * scale_y)
-
+                x1, y1, x2, y2 = map(int, [*box])
+                sx = full_frame.shape[1] / target_size
+                sy = full_frame.shape[0] / target_size
+                x1, y1, x2, y2 = int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
-                trackers.append((trk, label))
-                boxes.append((x1, y1, x2, y2, label, float(conf)))
+                trackers.append((trk, lbl))
+                boxes.append((x1, y1, x2, y2, lbl, float(conf)))
         else:
-            # tracking phase: parallel tracker updates
-            futures = [tracking_executor.submit(track_update, trk, lbl, full_frame) for trk, lbl in trackers]
+            futures = [tracking_executor.submit(track_update, trk, lbl, full_frame)
+                       for trk, lbl in trackers]
             new_boxes = []
-            for future in futures:
-                success, bbox, label = future.result()
-                if not success:
+            for fut in futures:
+                ok, bbox, lbl = fut.result()
+                if not ok:
                     continue
                 x, y, w, h = map(int, bbox)
-                new_boxes.append((x, y, x+w, y+h, label, None))
+                new_boxes.append((x, y, x+w, y+h, lbl, None))
             boxes = new_boxes
 
-        # draw boxes
-        for x1, y1, x2, y2, label, conf in boxes:
-            color = (255,0,0) if label=='person' else (0,0,255)
-            cv2.rectangle(full_frame, (x1,y1), (x2,y2), color, 2)
-            text = (
-                f"{label_map[label]} {conf*100:.1f}%"
-                if conf is not None else f"{label_map[label]} (추적됨)"
-            )
-            img_pil = Image.fromarray(full_frame[:,:,::-1])
-            draw = ImageDraw.Draw(img_pil)
-            w_txt, h_txt = draw.textsize(text, font=font)
-            draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0,0,0))
-            draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
-            full_frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        # 애노테이션
+        full_frame = annotate(full_frame, boxes)
 
-        # encode & enqueue
+        # 인코딩 & 큐
         _, buf = cv2.imencode('.jpg', full_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
-        # update fps
-        elapsed = time.time() - start
+        # FPS 계산
         with fps_lock:
-            current_fps = 1.0/elapsed if elapsed>0 else 0.0
+            current_fps = 1.0 / max((time.time() - start), 1e-6)
 
         time.sleep(0.001)
 
-# start capture thread
-def start_capture():
-    threading.Thread(target=capture_and_track, daemon=True).start()
-
-start_capture()
+# 시작
+threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
-# 5) Flask 앱 및 엔드포인트
+# 6) Flask 앱 및 엔드포인트
 app = Flask(__name__)
 
 def generate():
@@ -289,11 +276,10 @@ def video_feed():
 def stats():
     cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
-    temp = None
     try:
-        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read()) / 1000.0
     except:
-        pass
+        temp = None
     try:
         out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
         sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
