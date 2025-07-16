@@ -144,32 +144,26 @@ detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
 tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
 
 def create_tracker():
-    # CSRT 우선 시도, 시스템에 따라 경로가 다를 수 있으므로 다양한 위치를 체크
-    # OpenCV 4.x contrib 모듈 설치 시 cv2.legacy에 구현되어 있음
-    try:
-        # cv2.legacy 네임스페이스 확인
-        if hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'):
-            return cv2.legacy.TrackerCSRT_create()
-        # 직접 접근 가능한 경우
-        if hasattr(cv2, 'TrackerCSRT_create'):
-            return cv2.TrackerCSRT_create()
-        # 일부 빌드에서는 cv2.TrackerCSRT.create 형태일 수 있음
-        TrackerCSRT = getattr(cv2, 'TrackerCSRT', None)
-        if TrackerCSRT and hasattr(TrackerCSRT, 'create'):
-            return TrackerCSRT.create()
-    except Exception:
-        pass
-    # CSRT를 사용할 수 없으면 대체 트래커(MOSSE, KCF) 사용
-    for name in ['MOSSE', 'KCF']:
-        # legacy 네임스페이스 우선
-        if hasattr(cv2, 'legacy'):
-            fn = f'Tracker{name}_create'
-            if hasattr(cv2.legacy, fn):
-                return getattr(cv2.legacy, fn)()
-        # 기본 네임스페이스
-        fn = f'Tracker{name}_create'
-        if hasattr(cv2, fn):
-            return getattr(cv2, fn)()
+    constructors = [
+        ('cv2', 'TrackerMOSSE_create'),
+        ('cv2.legacy', 'TrackerMOSSE_create'),
+        ('cv2.legacy', 'TrackerCSRT_create'),
+        ('cv2', 'TrackerCSRT_create'),
+        ('cv2.legacy', 'TrackerKCF_create'),
+        ('cv2', 'TrackerKCF_create'),
+        ('cv2.legacy', 'TrackerMIL_create'),
+        ('cv2', 'TrackerMIL_create')
+    ]
+    for module_name, func_name in constructors:
+        try:
+            module = cv2
+            if module_name == 'cv2.legacy' and hasattr(cv2, 'legacy'):
+                module = cv2.legacy
+            tracker_fn = getattr(module, func_name, None)
+            if tracker_fn:
+                return tracker_fn()
+        except Exception:
+            continue
     raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
 
 # Helper for parallel tracking
