@@ -220,7 +220,7 @@ def capture_and_track():
         for x1, y1, x2, y2, lbl, conf in boxes:
             color = (255,0,0) if lbl=='person' else (0,0,255)
             draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-            text = f"{label_map[lbl]} {conf*100:.1f}%" if conf else f"{label_map[lbl]} (추적됨)"
+            text = label_map[lbl]  # 라벨만 표시
             w_txt, h_txt = draw.textsize(text, font=font)
             draw.rectangle([x1, y1-h_txt-4, x1+w_txt+4, y1], fill=(0,0,0))
             draw.text((x1+2, y1-h_txt-2), text, font=font, fill=(255,255,255))
