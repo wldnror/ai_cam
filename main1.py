@@ -21,6 +21,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, Response, render_template, jsonify, request
 from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 # ----------------------------------------
 # 0) 한글 폰트 설치 확인 및 로드
@@ -48,7 +49,6 @@ except Exception:
 
 # ----------------------------------------
 # 2) PyTorch 스레드 수 & YOLOv5 모델 로드
-import multiprocessing
 n_cpu = multiprocessing.cpu_count()
 torch.set_num_threads(n_cpu)
 torch.set_num_interop_threads(n_cpu)
@@ -136,6 +136,13 @@ frame_queue = queue.Queue(maxsize=3)
 current_fps = 0.0
 fps_lock = threading.Lock()
 
+# ThreadPoolExecutors for detection and tracking
+max_workers_track = n_cpu
+max_workers_detect = 1
+
+detection_executor = ThreadPoolExecutor(max_workers=max_workers_detect)
+tracking_executor = ThreadPoolExecutor(max_workers=max_workers_track)
+
 def create_tracker():
     constructors = [
         ('cv2', 'TrackerMOSSE_create'),
@@ -159,13 +166,19 @@ def create_tracker():
             continue
     raise RuntimeError("사용 가능한 트래커를 찾을 수 없습니다.")
 
+# Helper for parallel tracking
+
+def track_update(tracker, label, frame):
+    success, bbox = tracker.update(frame)
+    return success, bbox, label
+
+
 def capture_and_track():
     global current_fps
     target_size = 360
     detection_interval = 4
     frame_count = 0
     trackers = []
-    executor = ThreadPoolExecutor(max_workers=1)
 
     while True:
         start = time.time()
@@ -174,16 +187,15 @@ def capture_and_track():
             continue
 
         frame_count += 1
-        full_frame = frame
+        full_frame = frame.copy()
         boxes = []
 
         if frame_count % detection_interval == 0:
-            # clear trackers
+            # detection phase: clear trackers
             trackers.clear()
 
-            # resize & async detect
             small = cv2.resize(full_frame, (target_size, target_size))
-            future = executor.submit(lambda img: model(img, size=target_size), small)
+            future = detection_executor.submit(lambda img: model(img, size=target_size), small)
             results = future.result()
 
             for *box, conf, cls in results.xyxy[0]:
@@ -196,17 +208,16 @@ def capture_and_track():
                 x1 = int(x1 * scale_x); y1 = int(y1 * scale_y)
                 x2 = int(x2 * scale_x); y2 = int(y2 * scale_y)
 
-                # init tracker on full_frame
                 trk = create_tracker()
                 trk.init(full_frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((trk, label))
                 boxes.append((x1, y1, x2, y2, label, float(conf)))
-
         else:
-            # tracking only
+            # tracking phase: parallel tracker updates
+            futures = [tracking_executor.submit(track_update, trk, lbl, full_frame) for trk, lbl in trackers]
             new_boxes = []
-            for trk, label in trackers:
-                success, bbox = trk.update(full_frame)
+            for future in futures:
+                success, bbox, label = future.result()
                 if not success:
                     continue
                 x, y, w, h = map(int, bbox)
@@ -239,10 +250,13 @@ def capture_and_track():
         with fps_lock:
             current_fps = 1.0/elapsed if elapsed>0 else 0.0
 
-        # minimize sleep
         time.sleep(0.001)
 
-threading.Thread(target=capture_and_track, daemon=True).start()
+# start capture thread
+def start_capture():
+    threading.Thread(target=capture_and_track, daemon=True).start()
+
+start_capture()
 
 # ----------------------------------------
 # 5) Flask 앱 및 엔드포인트
