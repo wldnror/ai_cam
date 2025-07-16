@@ -162,6 +162,7 @@ def capture_and_track():
         boxes = []
 
         if frame_count % detection_interval == 0:
+            # 초기화 전 프레임 로드 비동기화 대기
             trackers.clear()
             with torch.no_grad():
                 results = model(frame, size=target_size)
@@ -175,6 +176,7 @@ def capture_and_track():
                 tracker.init(frame, (x1, y1, x2-x1, y2-y1))
                 trackers.append((tracker, label))
         else:
+            # 트래커로 위치만 업데이트
             new_boxes = []
             for tracker, label in trackers:
                 success, bbox = tracker.update(frame)
@@ -183,6 +185,7 @@ def capture_and_track():
                     new_boxes.append((x, y, x+w, y+h, label, None))
             boxes = new_boxes
 
+        # 박스 그리기 및 텍스트
         for x1, y1, x2, y2, label, conf in boxes:
             color = (255, 0, 0) if label == 'person' else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -194,18 +197,22 @@ def capture_and_track():
             draw.text((x1+2, y1-size[1]-2), text, font=font, fill=(255,255,255))
             frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
+        # JPEG 인코딩 후 큐에 저장
         _, buf = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
         if not frame_queue.empty():
             frame_queue.get_nowait()
         frame_queue.put(buf.tobytes())
 
+        # FPS 계산 및 저장
         elapsed = time.time() - start
         instant_fps = 1.0/elapsed if elapsed>0 else 0.0
         with fps_lock:
             current_fps = instant_fps
 
+        # 다음 프레임까지 대기
         time.sleep(max(0, interval-elapsed))
 
+# 트래킹 스레드 시작
 threading.Thread(target=capture_and_track, daemon=True).start()
 
 # ----------------------------------------
@@ -216,10 +223,8 @@ def generate():
     while True:
         frame = frame_queue.get()
         yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n"
-            + frame
-            + b"\r\n"
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
         )
 
 @app.route('/')
@@ -227,4 +232,39 @@ def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
-... (이하 동일)
+def video_feed():
+    resp = Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers.update({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    })
+    return resp
+
+@app.route('/stats')
+def stats():
+    cpu = psutil.cpu_percent(interval=0.5)
+    mem = psutil.virtual_memory().percent
+    temp = None
+    try:
+        temp = float(open('/sys/class/thermal/thermal_zone0/temp').read())/1000.0
+    except:
+        pass
+    try:
+        out = subprocess.check_output(['iwconfig','wlan0'], stderr=subprocess.DEVNULL).decode()
+        sig = int([p.split('=')[1] for p in out.split() if p.startswith('level=')][0])
+    except:
+        sig = None
+    with fps_lock:
+        fps = round(current_fps, 1)
+    return jsonify(
+        camera=1,
+        cpu_percent=cpu,
+        memory_percent=mem,
+        temperature_c=temp,
+        wifi_signal_dbm=sig,
+        fps=fps
+    )
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
